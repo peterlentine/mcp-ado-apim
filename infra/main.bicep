@@ -36,6 +36,18 @@ module managedIdentity 'modules/managed-identity.bicep' = {
   }
 }
 
+// Entra App Registration + Service Principal (Graph extension — tenant-scoped resources, ARM scope is rg)
+module entraApps 'modules/entra-apps.bicep' = {
+  name: 'entra-apps'
+  scope: rg
+  params: {
+    environmentName: environmentName
+  }
+  dependsOn: [
+    managedIdentity
+  ]
+}
+
 // Outputs
 output AZURE_LOCATION string = location
 output AZURE_TENANT_ID string = subscription().tenantId
@@ -44,3 +56,6 @@ output MANAGED_IDENTITY_ID string = managedIdentity.outputs.id
 output MANAGED_IDENTITY_OBJECT_ID string = managedIdentity.outputs.principalId
 output MANAGED_IDENTITY_CLIENT_ID string = managedIdentity.outputs.clientId
 output MANAGED_IDENTITY_NAME string = managedIdentity.outputs.name
+output APIM_APP_CLIENT_ID string = entraApps.outputs.appId
+output APIM_APP_OBJECT_ID string = entraApps.outputs.objectId
+output APIM_APP_SCOPE_ID string = entraApps.outputs.userImpersonationScopeId

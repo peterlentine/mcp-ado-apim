@@ -5,3 +5,10 @@ name: mcp-ado-apim
 infra:
   provider: bicep
   path: infra
+
+hooks:
+  postprovision:
+    shell: pwsh
+    run: hooks/postprovision.ps1
+    continueOnError: false
+    interactive: true

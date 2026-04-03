@@ -3,6 +3,11 @@
 ## TL;DR
 Create an Azure API Management gateway that proxies MCP requests to the Azure DevOps Remote MCP Server (`https://mcp.dev.azure.com/wegmans`), adding OAuth 2.0 OBO flow for secure token exchange. Infrastructure is Bicep + Microsoft Graph Bicep Extension, deployed via `azd`. **Restructured into 8 phases with validation gates** — each phase deploys incrementally and is verified before proceeding.
 
+## Important
+Before proceeding to the next step.
+- All validation phases should be executed by the agent 
+- Confirmation from the user should be granted before proceeding
+
 ## Parameters
 - **Subscription**: `8b0337f7-16f0-43e3-827a-9f438eac90e9`
 - **Tenant**: `1318d57f-757b-45b3-b1b0-9b3c3842774f`

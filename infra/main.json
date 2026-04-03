@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.38.33.27573",
-      "templateHash": "11548186212120494998"
+      "templateHash": "4266967454835064584"
     }
   },
   "parameters": {
@@ -131,6 +131,111 @@
       "dependsOn": [
         "[subscriptionResourceId('Microsoft.Resources/resourceGroups', variables('resourceGroupName'))]"
       ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "entra-apps",
+      "resourceGroup": "[variables('resourceGroupName')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "environmentName": {
+            "value": "[parameters('environmentName')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "languageVersion": "2.0",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.38.33.27573",
+              "templateHash": "5552419148370283181"
+            }
+          },
+          "parameters": {
+            "environmentName": {
+              "type": "string",
+              "metadata": {
+                "description": "Environment name used to generate a stable, unique app registration name."
+              }
+            }
+          },
+          "variables": {
+            "uniqueName": "[format('apim-mcp-ado-proxy-{0}', parameters('environmentName'))]",
+            "userImpersonationScopeId": "[guid(variables('uniqueName'), 'user_impersonation')]"
+          },
+          "imports": {
+            "microsoftGraphV1": {
+              "provider": "MicrosoftGraph",
+              "version": "1.0.0"
+            }
+          },
+          "resources": {
+            "apimApp": {
+              "import": "microsoftGraphV1",
+              "type": "Microsoft.Graph/applications@v1.0",
+              "properties": {
+                "uniqueName": "[variables('uniqueName')]",
+                "displayName": "APIM MCP ADO Proxy",
+                "signInAudience": "AzureADMyOrg",
+                "api": {
+                  "requestedAccessTokenVersion": 2
+                },
+                "requiredResourceAccess": [
+                  {
+                    "resourceAppId": "499b84ac-1321-427f-aa17-267ca6975798",
+                    "resourceAccess": [
+                      {
+                        "id": "ee69721e-6c3a-468f-a9ec-302d16a4c599",
+                        "type": "Scope"
+                      }
+                    ]
+                  }
+                ],
+                "web": {
+                  "redirectUris": [
+                    "https://login.microsoftonline.com/common/oauth2/nativeclient"
+                  ]
+                }
+              }
+            },
+            "apimSp": {
+              "import": "microsoftGraphV1",
+              "type": "Microsoft.Graph/servicePrincipals@v1.0",
+              "properties": {
+                "appId": "[reference('apimApp').appId]"
+              },
+              "dependsOn": [
+                "apimApp"
+              ]
+            }
+          },
+          "outputs": {
+            "appId": {
+              "type": "string",
+              "value": "[reference('apimApp').appId]"
+            },
+            "objectId": {
+              "type": "string",
+              "value": "[reference('apimApp').id]"
+            },
+            "userImpersonationScopeId": {
+              "type": "string",
+              "value": "[variables('userImpersonationScopeId')]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('resourceGroupName')), 'Microsoft.Resources/deployments', 'managed-identity')]",
+        "[subscriptionResourceId('Microsoft.Resources/resourceGroups', variables('resourceGroupName'))]"
+      ]
     }
   ],
   "outputs": {
@@ -161,6 +266,18 @@
     "MANAGED_IDENTITY_NAME": {
       "type": "string",
       "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('resourceGroupName')), 'Microsoft.Resources/deployments', 'managed-identity'), '2025-04-01').outputs.name.value]"
+    },
+    "APIM_APP_CLIENT_ID": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('resourceGroupName')), 'Microsoft.Resources/deployments', 'entra-apps'), '2025-04-01').outputs.appId.value]"
+    },
+    "APIM_APP_OBJECT_ID": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('resourceGroupName')), 'Microsoft.Resources/deployments', 'entra-apps'), '2025-04-01').outputs.objectId.value]"
+    },
+    "APIM_APP_SCOPE_ID": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('resourceGroupName')), 'Microsoft.Resources/deployments', 'entra-apps'), '2025-04-01').outputs.userImpersonationScopeId.value]"
     }
   }
 }
