@@ -135,7 +135,49 @@ resource prmPolicy 'Microsoft.ApiManagement/service/apis/operations/policies@202
 }
 
 // -----------------------------------------------------------------
+// Phase 5: ADO MCP Server — Backend + MCP API + OBO Policy
+// Uses 2024-06-01-preview which supports type: 'mcp'
+// -----------------------------------------------------------------
+resource adoMcpBackend 'Microsoft.ApiManagement/service/backends@2024-06-01-preview' = {
+  parent: apim
+  name: 'ado-mcp-backend'
+  properties: {
+    description: 'Azure DevOps Remote MCP Server (${adoOrganization} org)'
+    url: 'https://mcp.dev.azure.com/${adoOrganization}'
+    protocol: 'http'
+  }
+}
+
+resource adoMcpApi 'Microsoft.ApiManagement/service/apis@2024-06-01-preview' = {
+  parent: apim
+  name: 'ado-mcp'
+  properties: {
+    type: 'mcp'
+    displayName: 'Azure DevOps MCP'
+    description: 'Azure DevOps Remote MCP Server (${adoOrganization} org)'
+    subscriptionRequired: false
+    // path 'ado/mcp' → gateway endpoint: https://<apim>/ado/mcp
+    path: 'ado/mcp'
+    protocols: [
+      'https'
+    ]
+    backendId: adoMcpBackend.name
+  }
+  dependsOn: [nvTenantId, nvApimAppClientId, nvMiClientId, nvAdoOrg, nvAdoScope]
+}
+
+resource adoMcpApiPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-06-01-preview' = {
+  parent: adoMcpApi
+  name: 'policy'
+  properties: {
+    format: 'rawxml'
+    value: loadTextContent('../policies/mcp-server-obo.xml')
+  }
+}
+
+// -----------------------------------------------------------------
 // Outputs
 // -----------------------------------------------------------------
 output gatewayUrl string = apim.properties.gatewayUrl
 output apimName string = apim.name
+output adoMcpPath string = adoMcpApi.properties.path

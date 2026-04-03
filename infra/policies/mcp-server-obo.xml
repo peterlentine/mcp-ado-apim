@@ -1,0 +1,138 @@
+<policies>
+  <inbound>
+    <base />
+    <!--
+      MCP Server OBO Policy — applied at the ado-mcp API scope.
+      1. Validate the incoming Azure AD Bearer token (audience = our APIM app).
+      2. Extract the user token.
+      3. Acquire an MI assertion token (federated credential toward Entra).
+      4. Exchange user token for an ADO token via OBO (jwt-bearer grant).
+      5. On consent_required / interaction_required → return 403 with consent_uri.
+      6. On success → set Authorization header with the ADO OBO token.
+    -->
+
+    <!-- Step 1: Validate the incoming user Bearer token -->
+    <validate-azure-ad-token tenant-id="{{tenant-id}}"
+                              failed-validation-httpcode="401"
+                              failed-validation-error-message="Access token is missing or invalid.">
+      <audiences>
+        <audience>{{apim-app-client-id}}</audience>
+        <audience>api://{{apim-app-client-id}}</audience>
+      </audiences>
+    </validate-azure-ad-token>
+
+    <!-- Step 2: Stash the original user Bearer token before it might be replaced -->
+    <set-variable name="UserToken"
+                  value="@(context.Request.Headers.GetValueOrDefault("Authorization","").Replace("Bearer ",""))" />
+
+    <!-- Step 3: Acquire MI assertion token for client_assertion (federated credential) -->
+    <authentication-managed-identity resource="api://AzureADTokenExchange"
+                                      client-id="{{managed-identity-client-id}}"
+                                      output-token-variable-name="MiAssertionToken"
+                                      ignore-error="false" />
+
+    <!-- Step 4: OBO exchange — POST to Entra token endpoint -->
+    <send-request mode="new"
+                  response-variable-name="OboResponse"
+                  timeout="30"
+                  ignore-error="false">
+      <set-url>https://login.microsoftonline.com/{{tenant-id}}/oauth2/v2.0/token</set-url>
+      <set-method>POST</set-method>
+      <set-header name="Content-Type" exists-action="override">
+        <value>application/x-www-form-urlencoded</value>
+      </set-header>
+      <set-body>@{
+        var userToken       = (string)context.Variables["UserToken"];
+        var miToken         = (string)context.Variables["MiAssertionToken"];
+        var clientId        = "{{apim-app-client-id}}";
+        var adoScope        = "{{ado-scope}} offline_access";
+        return
+          "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer"
+          + "&client_id="            + Uri.EscapeDataString(clientId)
+          + "&client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+          + "&client_assertion="     + Uri.EscapeDataString(miToken)
+          + "&assertion="            + Uri.EscapeDataString(userToken)
+          + "&scope="                + Uri.EscapeDataString(adoScope)
+          + "&requested_token_use=on_behalf_of";
+      }</set-body>
+    </send-request>
+
+    <!-- Step 5: Parse OBO response and check for consent errors -->
+    <choose>
+      <when condition="@{
+        var status = ((IResponse)context.Variables["OboResponse"]).StatusCode;
+        if (status != 200) {
+          var body = ((IResponse)context.Variables["OboResponse"]).Body.As<string>(preserveContent: true);
+          return body.Contains("interaction_required")
+              || body.Contains("consent_required")
+              || body.Contains("invalid_grant");
+        }
+        return false;
+      }">
+        <!-- Consent required — return 403 with a usable consent_uri -->
+        <return-response>
+          <set-status code="403" reason="Consent Required" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>@{
+            var gatewayUrl = context.Request.OriginalUrl.Scheme + "://" + context.Request.OriginalUrl.Host;
+            return Newtonsoft.Json.JsonConvert.SerializeObject(new {
+              error       = "consent_required",
+              description = "User consent is required to access Azure DevOps. Visit consent_uri to grant access.",
+              consent_uri = gatewayUrl + "/authorize"
+            });
+          }</set-body>
+        </return-response>
+      </when>
+      <when condition="@(((IResponse)context.Variables["OboResponse"]).StatusCode != 200)">
+        <!-- Any other OBO failure — return 502 with the error details -->
+        <return-response>
+          <set-status code="502" reason="OBO Token Exchange Failed" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>@{
+            var body = ((IResponse)context.Variables["OboResponse"]).Body.As<string>(preserveContent: true);
+            return Newtonsoft.Json.JsonConvert.SerializeObject(new {
+              error       = "obo_exchange_failed",
+              description = "The OBO token exchange failed.",
+              details     = body
+            });
+          }</set-body>
+        </return-response>
+      </when>
+    </choose>
+
+    <!-- Step 6: OBO succeeded — extract the access_token and set Authorization header -->
+    <set-variable name="AdoAccessToken"
+                  value="@(((IResponse)context.Variables["OboResponse"]).Body.As<JObject>()["access_token"].ToString())" />
+
+    <set-header name="Authorization" exists-action="override">
+      <value>@("Bearer " + (string)context.Variables["AdoAccessToken"])</value>
+    </set-header>
+  </inbound>
+
+  <backend>
+    <base />
+  </backend>
+
+  <outbound>
+    <base />
+  </outbound>
+
+  <on-error>
+    <base />
+    <!-- On 401 errors, add WWW-Authenticate pointing to our PRM endpoint -->
+    <choose>
+      <when condition="@(context.Response.StatusCode == 401)">
+        <set-header name="WWW-Authenticate" exists-action="override">
+          <value>@{
+            var gatewayUrl = context.Request.OriginalUrl.Scheme + "://" + context.Request.OriginalUrl.Host;
+            return "Bearer resource_metadata=\"" + gatewayUrl + "/well-known/oauth-protected-resource\"";
+          }</value>
+        </set-header>
+      </when>
+    </choose>
+  </on-error>
+</policies>

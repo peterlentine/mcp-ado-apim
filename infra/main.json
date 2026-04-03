@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.38.33.27573",
-      "templateHash": "10143151989112215277"
+      "templateHash": "15213211345075577803"
     }
   },
   "parameters": {
@@ -280,7 +280,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.38.33.27573",
-              "templateHash": "11375831705962536470"
+              "templateHash": "10862717840624791217"
             }
           },
           "parameters": {
@@ -335,7 +335,8 @@
             }
           },
           "variables": {
-            "$fxv#0": "<policies>\r\n  <inbound>\r\n    <base />\r\n    <return-response>\r\n      <set-status code=\"200\" reason=\"OK\" />\r\n      <set-header name=\"Content-Type\" exists-action=\"override\">\r\n        <value>application/json</value>\r\n      </set-header>\r\n      <set-body>@{\r\n        var gatewayUrl = context.Request.OriginalUrl.Scheme + \"://\" + context.Request.OriginalUrl.Host;\r\n        var tenantId = \"{{tenant-id}}\";\r\n        var clientId = \"{{apim-app-client-id}}\";\r\n        return Newtonsoft.Json.JsonConvert.SerializeObject(new {\r\n          resource = gatewayUrl + \"/mcp\",\r\n          authorization_servers = new[] {\r\n            \"https://login.microsoftonline.com/\" + tenantId + \"/v2.0\"\r\n          },\r\n          scopes_supported = new[] {\r\n            \"api://\" + clientId + \"/user_impersonation\"\r\n          },\r\n          bearer_methods_supported = new[] { \"header\" },\r\n          resource_documentation = gatewayUrl + \"/well-known/oauth-protected-resource\",\r\n          resource_name = \"APIM MCP ADO Proxy\"\r\n        });\r\n      }</set-body>\r\n    </return-response>\r\n  </inbound>\r\n  <backend>\r\n    <base />\r\n  </backend>\r\n  <outbound>\r\n    <base />\r\n  </outbound>\r\n  <on-error>\r\n    <base />\r\n  </on-error>\r\n</policies>\r\n"
+            "$fxv#0": "<policies>\r\n  <inbound>\r\n    <base />\r\n    <return-response>\r\n      <set-status code=\"200\" reason=\"OK\" />\r\n      <set-header name=\"Content-Type\" exists-action=\"override\">\r\n        <value>application/json</value>\r\n      </set-header>\r\n      <set-body>@{\r\n        var gatewayUrl = context.Request.OriginalUrl.Scheme + \"://\" + context.Request.OriginalUrl.Host;\r\n        var tenantId = \"{{tenant-id}}\";\r\n        var clientId = \"{{apim-app-client-id}}\";\r\n        return Newtonsoft.Json.JsonConvert.SerializeObject(new {\r\n          resource = gatewayUrl + \"/ado/mcp\",\r\n          authorization_servers = new[] {\r\n            \"https://login.microsoftonline.com/\" + tenantId + \"/v2.0\"\r\n          },\r\n          scopes_supported = new[] {\r\n            \"api://\" + clientId + \"/user_impersonation\"\r\n          },\r\n          bearer_methods_supported = new[] { \"header\" },\r\n          resource_documentation = gatewayUrl + \"/well-known/oauth-protected-resource\",\r\n          resource_name = \"APIM MCP ADO Proxy\"\r\n        });\r\n      }</set-body>\r\n    </return-response>\r\n  </inbound>\r\n  <backend>\r\n    <base />\r\n  </backend>\r\n  <outbound>\r\n    <base />\r\n  </outbound>\r\n  <on-error>\r\n    <base />\r\n  </on-error>\r\n</policies>\r\n",
+            "$fxv#1": "<policies>\r\n  <inbound>\r\n    <base />\r\n    <!--\r\n      MCP Server OBO Policy — applied at the ado-mcp API scope.\r\n      1. Validate the incoming Azure AD Bearer token (audience = our APIM app).\r\n      2. Extract the user token.\r\n      3. Acquire an MI assertion token (federated credential toward Entra).\r\n      4. Exchange user token for an ADO token via OBO (jwt-bearer grant).\r\n      5. On consent_required / interaction_required → return 403 with consent_uri.\r\n      6. On success → set Authorization header with the ADO OBO token.\r\n    -->\r\n\r\n    <!-- Step 1: Validate the incoming user Bearer token -->\r\n    <validate-azure-ad-token tenant-id=\"{{tenant-id}}\"\r\n                              failed-validation-httpcode=\"401\"\r\n                              failed-validation-error-message=\"Access token is missing or invalid.\">\r\n      <client-application-ids>\r\n        <application-id>{{apim-app-client-id}}</application-id>\r\n      </client-application-ids>\r\n      <audiences>\r\n        <audience>{{apim-app-client-id}}</audience>\r\n        <audience>api://{{apim-app-client-id}}</audience>\r\n      </audiences>\r\n    </validate-azure-ad-token>\r\n\r\n    <!-- Step 2: Stash the original user Bearer token before it might be replaced -->\r\n    <set-variable name=\"UserToken\"\r\n                  value=\"@(context.Request.Headers.GetValueOrDefault(\"Authorization\",\"\").Replace(\"Bearer \",\"\"))\" />\r\n\r\n    <!-- Step 3: Acquire MI assertion token for client_assertion (federated credential) -->\r\n    <authentication-managed-identity resource=\"api://AzureADTokenExchange\"\r\n                                      client-id=\"{{managed-identity-client-id}}\"\r\n                                      output-token-variable-name=\"MiAssertionToken\"\r\n                                      ignore-error=\"false\" />\r\n\r\n    <!-- Step 4: OBO exchange — POST to Entra token endpoint -->\r\n    <send-request mode=\"new\"\r\n                  response-variable-name=\"OboResponse\"\r\n                  timeout=\"30\"\r\n                  ignore-error=\"false\">\r\n      <set-url>https://login.microsoftonline.com/{{tenant-id}}/oauth2/v2.0/token</set-url>\r\n      <set-method>POST</set-method>\r\n      <set-header name=\"Content-Type\" exists-action=\"override\">\r\n        <value>application/x-www-form-urlencoded</value>\r\n      </set-header>\r\n      <set-body>@{\r\n        var userToken       = (string)context.Variables[\"UserToken\"];\r\n        var miToken         = (string)context.Variables[\"MiAssertionToken\"];\r\n        var clientId        = \"{{apim-app-client-id}}\";\r\n        var adoScope        = \"{{ado-scope}} offline_access\";\r\n        return\r\n          \"grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer\"\r\n          + \"&client_id=\"            + Uri.EscapeDataString(clientId)\r\n          + \"&client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\"\r\n          + \"&client_assertion=\"     + Uri.EscapeDataString(miToken)\r\n          + \"&assertion=\"            + Uri.EscapeDataString(userToken)\r\n          + \"&scope=\"                + Uri.EscapeDataString(adoScope)\r\n          + \"&requested_token_use=on_behalf_of\";\r\n      }</set-body>\r\n    </send-request>\r\n\r\n    <!-- Step 5: Parse OBO response and check for consent errors -->\r\n    <choose>\r\n      <when condition=\"@{\r\n        var status = ((IResponse)context.Variables[\"OboResponse\"]).StatusCode;\r\n        if (status != 200) {\r\n          var body = ((IResponse)context.Variables[\"OboResponse\"]).Body.As<string>(preserveContent: true);\r\n          return body.Contains(\"interaction_required\")\r\n              || body.Contains(\"consent_required\")\r\n              || body.Contains(\"invalid_grant\");\r\n        }\r\n        return false;\r\n      }\">\r\n        <!-- Consent required — return 403 with a usable consent_uri -->\r\n        <return-response>\r\n          <set-status code=\"403\" reason=\"Consent Required\" />\r\n          <set-header name=\"Content-Type\" exists-action=\"override\">\r\n            <value>application/json</value>\r\n          </set-header>\r\n          <set-body>@{\r\n            var gatewayUrl = context.Request.OriginalUrl.Scheme + \"://\" + context.Request.OriginalUrl.Host;\r\n            return Newtonsoft.Json.JsonConvert.SerializeObject(new {\r\n              error       = \"consent_required\",\r\n              description = \"User consent is required to access Azure DevOps. Visit consent_uri to grant access.\",\r\n              consent_uri = gatewayUrl + \"/authorize\"\r\n            });\r\n          }</set-body>\r\n        </return-response>\r\n      </when>\r\n      <when condition=\"@(((IResponse)context.Variables[\"OboResponse\"]).StatusCode != 200)\">\r\n        <!-- Any other OBO failure — return 502 with the error details -->\r\n        <return-response>\r\n          <set-status code=\"502\" reason=\"OBO Token Exchange Failed\" />\r\n          <set-header name=\"Content-Type\" exists-action=\"override\">\r\n            <value>application/json</value>\r\n          </set-header>\r\n          <set-body>@{\r\n            var body = ((IResponse)context.Variables[\"OboResponse\"]).Body.As<string>(preserveContent: true);\r\n            return Newtonsoft.Json.JsonConvert.SerializeObject(new {\r\n              error       = \"obo_exchange_failed\",\r\n              description = \"The OBO token exchange failed.\",\r\n              details     = body\r\n            });\r\n          }</set-body>\r\n        </return-response>\r\n      </when>\r\n    </choose>\r\n\r\n    <!-- Step 6: OBO succeeded — extract the access_token and set Authorization header -->\r\n    <set-variable name=\"AdoAccessToken\"\r\n                  value=\"@(((IResponse)context.Variables[\"OboResponse\"]).Body.As<JObject>()[\"access_token\"].ToString())\" />\r\n\r\n    <set-header name=\"Authorization\" exists-action=\"override\">\r\n      <value>@(\"Bearer \" + (string)context.Variables[\"AdoAccessToken\"])</value>\r\n    </set-header>\r\n  </inbound>\r\n\r\n  <backend>\r\n    <base />\r\n  </backend>\r\n\r\n  <outbound>\r\n    <base />\r\n  </outbound>\r\n\r\n  <on-error>\r\n    <base />\r\n    <!-- On 401 errors, add WWW-Authenticate pointing to our PRM endpoint -->\r\n    <choose>\r\n      <when condition=\"@(context.Response.StatusCode == 401)\">\r\n        <set-header name=\"WWW-Authenticate\" exists-action=\"override\">\r\n          <value>@{\r\n            var gatewayUrl = context.Request.OriginalUrl.Scheme + \"://\" + context.Request.OriginalUrl.Host;\r\n            return \"Bearer resource_metadata=\\\"\" + gatewayUrl + \"/well-known/oauth-protected-resource\\\"\";\r\n          }</value>\r\n        </set-header>\r\n      </when>\r\n    </choose>\r\n  </on-error>\r\n</policies>\r\n"
           },
           "resources": [
             {
@@ -467,6 +468,56 @@
                 "[resourceId('Microsoft.ApiManagement/service/namedValues', parameters('name'), 'tenant-id')]",
                 "[resourceId('Microsoft.ApiManagement/service/apis/operations', parameters('name'), 'prm', 'get-oauth-protected-resource')]"
               ]
+            },
+            {
+              "type": "Microsoft.ApiManagement/service/backends",
+              "apiVersion": "2024-06-01-preview",
+              "name": "[format('{0}/{1}', parameters('name'), 'ado-mcp-backend')]",
+              "properties": {
+                "description": "[format('Azure DevOps Remote MCP Server ({0} org)', parameters('adoOrganization'))]",
+                "url": "[format('https://mcp.dev.azure.com/{0}', parameters('adoOrganization'))]",
+                "protocol": "http"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ApiManagement/service', parameters('name'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.ApiManagement/service/apis",
+              "apiVersion": "2024-06-01-preview",
+              "name": "[format('{0}/{1}', parameters('name'), 'ado-mcp')]",
+              "properties": {
+                "type": "mcp",
+                "displayName": "Azure DevOps MCP",
+                "description": "[format('Azure DevOps Remote MCP Server ({0} org)', parameters('adoOrganization'))]",
+                "subscriptionRequired": false,
+                "path": "ado/mcp",
+                "protocols": [
+                  "https"
+                ],
+                "backendId": "ado-mcp-backend"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ApiManagement/service/backends', parameters('name'), 'ado-mcp-backend')]",
+                "[resourceId('Microsoft.ApiManagement/service', parameters('name'))]",
+                "[resourceId('Microsoft.ApiManagement/service/namedValues', parameters('name'), 'ado-org')]",
+                "[resourceId('Microsoft.ApiManagement/service/namedValues', parameters('name'), 'ado-scope')]",
+                "[resourceId('Microsoft.ApiManagement/service/namedValues', parameters('name'), 'apim-app-client-id')]",
+                "[resourceId('Microsoft.ApiManagement/service/namedValues', parameters('name'), 'managed-identity-client-id')]",
+                "[resourceId('Microsoft.ApiManagement/service/namedValues', parameters('name'), 'tenant-id')]"
+              ]
+            },
+            {
+              "type": "Microsoft.ApiManagement/service/apis/policies",
+              "apiVersion": "2024-06-01-preview",
+              "name": "[format('{0}/{1}/{2}', parameters('name'), 'ado-mcp', 'policy')]",
+              "properties": {
+                "format": "rawxml",
+                "value": "[variables('$fxv#1')]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ApiManagement/service/apis', parameters('name'), 'ado-mcp')]"
+              ]
             }
           ],
           "outputs": {
@@ -477,6 +528,10 @@
             "apimName": {
               "type": "string",
               "value": "[parameters('name')]"
+            },
+            "adoMcpPath": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ApiManagement/service/apis', parameters('name'), 'ado-mcp'), '2024-06-01-preview').path]"
             }
           }
         }
@@ -536,6 +591,10 @@
     "APIM_NAME": {
       "type": "string",
       "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('resourceGroupName')), 'Microsoft.Resources/deployments', 'apim'), '2025-04-01').outputs.apimName.value]"
+    },
+    "APIM_MCP_URL": {
+      "type": "string",
+      "value": "[format('{0}/{1}', reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('resourceGroupName')), 'Microsoft.Resources/deployments', 'apim'), '2025-04-01').outputs.gatewayUrl.value, reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('resourceGroupName')), 'Microsoft.Resources/deployments', 'apim'), '2025-04-01').outputs.adoMcpPath.value)]"
     }
   }
 }

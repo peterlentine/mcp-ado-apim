@@ -5,7 +5,8 @@ Create an Azure API Management gateway that proxies MCP requests to the Azure De
 
 ## Important
 Before proceeding to the next step.
-- All validation phases should be executed by the agent 
+- All validation phases should be executed by the agent.
+- Once validation is complete update the [implementation-output](implementation-output.md)
 - Confirmation from the user should be granted before proceeding
 
 ## Parameters

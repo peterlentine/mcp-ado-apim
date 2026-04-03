@@ -77,3 +77,4 @@ output APIM_APP_OBJECT_ID string = entraApps.outputs.objectId
 output APIM_APP_SCOPE_ID string = entraApps.outputs.userImpersonationScopeId
 output APIM_GATEWAY_URL string = apim.outputs.gatewayUrl
 output APIM_NAME string = apim.outputs.apimName
+output APIM_MCP_URL string = '${apim.outputs.gatewayUrl}/${apim.outputs.adoMcpPath}'

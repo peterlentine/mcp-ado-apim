@@ -11,7 +11,7 @@
         var tenantId = "{{tenant-id}}";
         var clientId = "{{apim-app-client-id}}";
         return Newtonsoft.Json.JsonConvert.SerializeObject(new {
-          resource = gatewayUrl + "/mcp",
+          resource = gatewayUrl + "/ado/mcp",
           authorization_servers = new[] {
             "https://login.microsoftonline.com/" + tenantId + "/v2.0"
           },

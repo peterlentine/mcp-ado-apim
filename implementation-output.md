@@ -188,54 +188,75 @@
 
 ---
 
-## Phase 5 — APIM MCP Proxy API + OBO Policy
+## Phase 5 — APIM MCP Server (Native) + OBO Policy
+
+### Research Finding
+
+The plan assumed APIM MCP Servers require a separate ARM resource type (`Microsoft.ApiManagement/service/mcpServers`) or portal-only creation. **This is incorrect.** APIM MCP Servers are created as standard `Microsoft.ApiManagement/service/apis` resources with `type: 'mcp'`, supported since API version `2024-06-01-preview`. Full Bicep automation is possible — no hook or portal step needed.
+
+Discovery method: tested `apiType: 'mcp'` and confirmed `type: 'mcp'` property round-trips via ARM. Confirmed via Azure Samples reference Bicep (`mcp-client-authorization` lab).
+
+**MCP Server endpoint URL format**: APIM routes `POST /<path>` → backend MCP server. With `path: 'ado/mcp'`, the client endpoint is `https://apim-ptw4lax6otj5i.azure-api.net/ado/mcp`.
 
 ### Changes Made
 
 | File | Action | Description |
 |------|--------|-------------|
-| `infra/policies/mcp-proxy.xml` | Created | Full OBO flow policy — token validation → MI assertion → OBO exchange → consent check → forward to ADO backend |
-| `infra/modules/apim.bicep` | Updated | Added ADO backend (`https://mcp.dev.azure.com/wegmans`); MCP Proxy API (path `mcp`, `subscriptionRequired: false`); operations `POST /*`, `GET /*`, `DELETE /*`; policy referencing `mcp-proxy.xml` |
-| `hooks/postprovision.ps1` | Updated | Added Azure CLI (`04b07795-8ddb-461a-bbee-02f9e1bf7b46`) to `preAuthorizedApplications` alongside VS Code; updated pre-auth logic to build merged array idempotently |
+| `infra/policies/mcp-server-obo.xml` | Created | OBO policy applied at the `ado-mcp` API scope — token validation → user token extraction → MI assertion → OBO exchange → consent check → set ADO Bearer header |
+| `infra/modules/apim.bicep` | Updated | Added `Microsoft.ApiManagement/service/backends@2024-06-01-preview` (`ado-mcp-backend`, url `https://mcp.dev.azure.com/wegmans`); added `Microsoft.ApiManagement/service/apis@2024-06-01-preview` (`ado-mcp`, `type: 'mcp'`, `path: 'ado/mcp'`, `backendId: 'ado-mcp-backend'`); added policy resource referencing `mcp-server-obo.xml`; added `adoMcpPath` output |
+| `infra/policies/prm-endpoint.xml` | Updated | `resource` field changed from `gatewayUrl + "/mcp"` to `gatewayUrl + "/ado/mcp"` |
+| `infra/main.bicep` | Updated | Added `APIM_MCP_URL` output (`${gatewayUrl}/${adoMcpPath}`) |
 
-**MCP proxy policy flow**
+**MCP OBO policy flow**
 
 | Step | Policy Element | Purpose |
 |------|---------------|---------|
-| 1 | `validate-azure-ad-token` | Validates Bearer token audience (`{{apim-app-client-id}}` and `api://{{apim-app-client-id}}`), returns 401 on failure |
-| 2 | `set-variable UserToken` | Extracts raw JWT from `Authorization` header for use as OBO assertion |
-| 3 | `authentication-managed-identity` | Acquires MI assertion token for `api://AzureADTokenExchange` using `{{managed-identity-client-id}}` |
-| 4 | `send-request OboResponse` | Posts OBO exchange (`grant_type=jwt-bearer`, `client_assertion={MI token}`, `assertion={user token}`, `scope={{ado-scope}}`) to Entra v2.0 token endpoint |
-| 5 | `<choose>` | Inspects OBO response — if `interaction_required`/`invalid_grant`/`consent_required` → returns 403 with `consent_uri`; other errors → 502 |
-| 6 | `set-header Authorization` | Replaces inbound `Authorization` with OBO ADO token |
-| 7 | `on-error` | Adds `WWW-Authenticate: Bearer resource_metadata="..."` header on any 401 |
+| 1 | `validate-azure-ad-token` | Validates Bearer token; accepts audience as bare GUID (`{{apim-app-client-id}}`) or `api://` prefixed form; returns 401 on failure |
+| 2 | `set-variable UserToken` | Extracts raw JWT from `Authorization` header before it is overwritten |
+| 3 | `authentication-managed-identity` | Acquires MI assertion token for `api://AzureADTokenExchange` using `{{managed-identity-client-id}}`; output → `MiAssertionToken` |
+| 4 | `send-request OboResponse` | Posts OBO exchange (`grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`, `client_assertion_type=jwt-bearer`, `client_assertion={MI token}`, `assertion={user token}`, `scope={{ado-scope}} offline_access`) to Entra v2.0 token endpoint |
+| 5 | `<choose>` | Inspects OBO status: non-200 body contains `interaction_required`/`consent_required`/`invalid_grant` → 403 + `consent_uri`; other non-200 → 502 with details |
+| 6 | `set-header Authorization` | Replaces inbound `Authorization` with OBO ADO access token |
+| 7 | `on-error` | Adds `WWW-Authenticate: Bearer resource_metadata="..."` header on 401 |
 
 ### Issues Encountered
 
 | Issue | Fix |
 |-------|-----|
-| `validate-azure-ad-token` with only `<audience>api://{{apim-app-client-id}}</audience>` — v2.0 tokens from Azure CLI have `aud = {GUID}` (bare client ID, no `api://` prefix), causing all tokens to fail validation | Added second `<audience>{{apim-app-client-id}}</audience>` entry; both forms now accepted |
-| `<client-application-ids>` element checked `azp` claim (the caller's app ID), blocking all clients except the app itself — Azure CLI tokens have `azp = 04b07795-...` which was not in the list | Removed `<client-application-ids>` entirely; `preAuthorizedApplications` on the app registration is the correct enforcement layer |
-| Entra error `AADSTS53003` on login — Conditional Access policy blocked device code flow for Azure CLI app | Not needed — switched to `az account get-access-token` (existing session); added Azure CLI to `preAuthorizedApplications` to enable silent token acquisition |
+| `<client-application-ids>` in `validate-azure-ad-token` blocked all callers — it checks the `azp` claim (client that obtained the token), which is Azure CLI `04b07795-...` or VS Code `aebc6443-...`, not our app | Removed `<client-application-ids>` block entirely; audience validation plus `preAuthorizedApplications` on the app registration is the correct enforcement layer |
+| First `azd provision` created `ado-mcp` API with `path: 'ado'` (leftover exploratory REST call); Bicep updated it to `path: 'ado/mcp'` on second provision | Resolved automatically by re-running `azd provision` — ARM PUT is idempotent |
+| `postprovision.ps1` hook emits `Continuous access evaluation` (CAE) errors against Graph API during re-runs — Graph token was issued before a CA policy refresh | Non-blocking — all Graph operations were already idempotent from previous phases; re-running `az login` before next provision resolves |
 
 ### Validation Results
 
 | Check | Result |
 |-------|--------|
-| `az bicep build infra/main.bicep` | ✅ Zero errors, zero warnings |
+| `az bicep build infra/main.bicep` | ✅ Zero errors (1 BCP037 warning — known Bicep type schema lag for `backendId` on MCP API type, valid at runtime) |
 | `azd provision` | ✅ Succeeded |
-| `POST /mcp` (no token) → HTTP 401, `WWW-Authenticate: Bearer resource_metadata="https://apim-ptw4lax6otj5i.azure-api.net/well-known/oauth-protected-resource"` | ✅ Confirmed |
-| `POST /mcp` (valid Bearer token via `az account get-access-token`) → HTTP 403 `consent_required` | ✅ Confirmed — response below |
-| Backend `ado-mcp-backend` configured — `url = https://mcp.dev.azure.com/wegmans` | ✅ Confirmed |
-| `az apim api show ... --api-id mcp-proxy` — exists, 3 operations (POST/GET/DELETE) | ✅ Confirmed |
-| `web.redirectUris` includes `https://apim-ptw4lax6otj5i.azure-api.net/callback` | ✅ Confirmed |
-| Hook second run — all pre-auth steps skipped (idempotent) | ✅ Confirmed |
+| `ado-mcp` API: `type = mcp`, `path = ado/mcp`, `backendId = ado-mcp-backend` | ✅ Confirmed |
+| `ado-mcp-backend`: `url = https://mcp.dev.azure.com/wegmans` | ✅ Confirmed |
+| OBO policy XML applied to `ado-mcp` API scope | ✅ Confirmed via ARM GET |
+| `GET /well-known/oauth-protected-resource` → `resource = https://apim-ptw4lax6otj5i.azure-api.net/ado/mcp` | ✅ Confirmed |
+| `POST /ado/mcp` (no token) → HTTP 401, `WWW-Authenticate: Bearer resource_metadata="https://apim-ptw4lax6otj5i.azure-api.net/well-known/oauth-protected-resource"` | ✅ Confirmed |
+| `POST /ado/mcp` (valid Bearer token via `az account get-access-token`) → HTTP 403 `consent_required` | ✅ Confirmed — response below |
+
+**PRM endpoint response (updated)**
+```json
+{
+  "resource": "https://apim-ptw4lax6otj5i.azure-api.net/ado/mcp",
+  "authorization_servers": ["https://login.microsoftonline.com/1318d57f-757b-45b3-b1b0-9b3c3842774f/v2.0"],
+  "scopes_supported": ["api://36eb7a86-3565-4c53-b010-2d2dc98c5cc2/user_impersonation"],
+  "bearer_methods_supported": ["header"],
+  "resource_documentation": "https://apim-ptw4lax6otj5i.azure-api.net/well-known/oauth-protected-resource",
+  "resource_name": "APIM MCP ADO Proxy"
+}
+```
 
 **403 consent_required response**
 ```json
 {
   "error": "consent_required",
-  "error_description": "User consent is required for Azure DevOps access. Visit the consent_uri to grant access.",
+  "description": "User consent is required to access Azure DevOps. Visit consent_uri to grant access.",
   "consent_uri": "https://apim-ptw4lax6otj5i.azure-api.net/authorize"
 }
 ```
@@ -262,10 +283,9 @@
 | `infra/modules/managed-identity.bicep` | 1 | ✅ Complete |
 | `infra/modules/entra-apps.bicep` | 2 | ✅ Complete |
 | `infra/modules/apim.bicep` | 4, 5 | ✅ Phase 4+5 complete |
-| `infra/policies/prm-endpoint.xml` | 4 | ✅ Complete |
-| `infra/policies/mcp-proxy.xml` | 5 | ✅ Complete |
+| `infra/policies/prm-endpoint.xml` | 4, 5 | ✅ Complete (resource URL updated to `/ado/mcp`) |
+| `infra/policies/mcp-server-obo.xml` | 5 | ✅ Complete |
 | `hooks/postprovision.ps1` | 3, 5 | ✅ Phase 3+5 complete |
-| `tools/test-phase5.ps1` | 5 | ✅ Validation script |
 | `infra/policies/authorize.xml` | 6 | ⬜ Not started |
 | `infra/policies/callback.xml` | 6 | ⬜ Not started |
 | `tools/test-auth.ps1` | 7 | ⬜ Not started |
