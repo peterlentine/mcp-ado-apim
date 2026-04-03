@@ -1,0 +1,113 @@
+<policies>
+  <inbound>
+    <base />
+    <!-- Step 1: Validate inbound Bearer token — must be issued for this APIM app -->
+    <validate-azure-ad-token tenant-id="{{tenant-id}}" failed-validation-httpcode="401" failed-validation-error-message="Unauthorized">
+      <audiences>
+        <audience>{{apim-app-client-id}}</audience>
+        <audience>api://{{apim-app-client-id}}</audience>
+      </audiences>
+    </validate-azure-ad-token>
+    <!-- Step 2: Stash the raw user Bearer token for OBO -->
+    <set-variable name="UserToken" value="@(context.Request.Headers.GetValueOrDefault("Authorization","").Replace("Bearer ",""))" />
+    <!-- Step 3: Get MI assertion token for api://AzureADTokenExchange (used as client_assertion) -->
+    <authentication-managed-identity resource="api://AzureADTokenExchange" client-id="{{managed-identity-client-id}}" output-token-variable-name="MiAssertionToken" ignore-error="false" />
+    <!-- Step 4: OBO exchange — trade user token for ADO token -->
+    <send-request mode="new" response-variable-name="OboResponse" timeout="20" ignore-error="false">
+      <set-url>https://login.microsoftonline.com/{{tenant-id}}/oauth2/v2.0/token</set-url>
+      <set-method>POST</set-method>
+      <set-header name="Content-Type" exists-action="override">
+        <value>application/x-www-form-urlencoded</value>
+      </set-header>
+      <set-body>@{
+        return "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer"
+          + "&client_id={{apim-app-client-id}}"
+          + "&client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+          + "&client_assertion=" + System.Net.WebUtility.UrlEncode((string)context.Variables["MiAssertionToken"])
+          + "&assertion=" + System.Net.WebUtility.UrlEncode((string)context.Variables["UserToken"])
+          + "&scope=" + System.Net.WebUtility.UrlEncode("{{ado-scope}} openid profile")
+          + "&requested_token_use=on_behalf_of";
+      }</set-body>
+    </send-request>
+    <!-- Step 5: Check OBO result — detect consent_required / interaction_required -->
+    <choose>
+      <when condition="@(((IResponse)context.Variables["OboResponse"]).StatusCode != 200)">
+        <set-variable name="OboError" value="@{
+          var body = ((IResponse)context.Variables["OboResponse"]).Body.As<string>(preserveContent: true);
+          try {
+            var json = Newtonsoft.Json.Linq.JObject.Parse(body);
+            return json["error"]?.ToString() ?? "unknown_error";
+          } catch { return "unknown_error"; }
+        }" />
+        <choose>
+          <when condition="@{
+            var err = (string)context.Variables["OboError"];
+            return err == "interaction_required" || err == "invalid_grant" || err == "consent_required";
+          }">
+            <return-response>
+              <set-status code="403" reason="Forbidden" />
+              <set-header name="Content-Type" exists-action="override">
+                <value>application/json</value>
+              </set-header>
+              <set-body>@{
+                var gatewayUrl = context.Request.OriginalUrl.Scheme + "://" + context.Request.OriginalUrl.Host;
+                return Newtonsoft.Json.JsonConvert.SerializeObject(new {
+                  error = "consent_required",
+                  error_description = "User consent is required for Azure DevOps access. Visit the consent_uri to grant access.",
+                  consent_uri = gatewayUrl + "/authorize"
+                });
+              }</set-body>
+            </return-response>
+          </when>
+          <otherwise>
+            <return-response>
+              <set-status code="502" reason="Bad Gateway" />
+              <set-header name="Content-Type" exists-action="override">
+                <value>application/json</value>
+              </set-header>
+              <set-body>@{
+                var body = ((IResponse)context.Variables["OboResponse"]).Body.As<string>(preserveContent: true);
+                return Newtonsoft.Json.JsonConvert.SerializeObject(new {
+                  error = "token_exchange_failed",
+                  error_description = body
+                });
+              }</set-body>
+            </return-response>
+          </otherwise>
+        </choose>
+      </when>
+    </choose>
+    <!-- Step 6: Extract the ADO access token and replace Authorization header -->
+    <set-variable name="AdoToken" value="@{
+      var body = ((IResponse)context.Variables["OboResponse"]).Body.As<string>(preserveContent: true);
+      var json = Newtonsoft.Json.Linq.JObject.Parse(body);
+      return json["access_token"]?.ToString() ?? string.Empty;
+    }" />
+    <set-header name="Authorization" exists-action="override">
+      <value>@("Bearer " + (string)context.Variables["AdoToken"])</value>
+    </set-header>
+    <!-- Step 7: Strip subscription key header if present -->
+    <set-header name="Ocp-Apim-Subscription-Key" exists-action="delete" />
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+    <!-- Expose WWW-Authenticate on 401 from backend for good measure -->
+  </outbound>
+  <on-error>
+    <base />
+    <!-- On validation failure (401), add WWW-Authenticate so clients can discover the PRM URL -->
+    <choose>
+      <when condition="@(context.Response.StatusCode == 401)">
+        <set-header name="WWW-Authenticate" exists-action="override">
+          <value>@{
+            var gatewayUrl = context.Request.OriginalUrl.Scheme + "://" + context.Request.OriginalUrl.Host;
+            return "Bearer resource_metadata=\"" + gatewayUrl + "/well-known/oauth-protected-resource\"";
+          }</value>
+        </set-header>
+      </when>
+    </choose>
+  </on-error>
+</policies>

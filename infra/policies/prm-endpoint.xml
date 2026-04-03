@@ -1,0 +1,37 @@
+<policies>
+  <inbound>
+    <base />
+    <return-response>
+      <set-status code="200" reason="OK" />
+      <set-header name="Content-Type" exists-action="override">
+        <value>application/json</value>
+      </set-header>
+      <set-body>@{
+        var gatewayUrl = context.Request.OriginalUrl.Scheme + "://" + context.Request.OriginalUrl.Host;
+        var tenantId = "{{tenant-id}}";
+        var clientId = "{{apim-app-client-id}}";
+        return Newtonsoft.Json.JsonConvert.SerializeObject(new {
+          resource = gatewayUrl + "/mcp",
+          authorization_servers = new[] {
+            "https://login.microsoftonline.com/" + tenantId + "/v2.0"
+          },
+          scopes_supported = new[] {
+            "api://" + clientId + "/user_impersonation"
+          },
+          bearer_methods_supported = new[] { "header" },
+          resource_documentation = gatewayUrl + "/well-known/oauth-protected-resource",
+          resource_name = "APIM MCP ADO Proxy"
+        });
+      }</set-body>
+    </return-response>
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>

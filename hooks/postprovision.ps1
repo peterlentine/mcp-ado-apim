@@ -83,29 +83,28 @@ if ($hasScope) {
 }
 
 # ---------------------------------------------------------------------------
-# 3. Add preAuthorizedApplications for VS Code (idempotent)
+# 3. Add preAuthorizedApplications for VS Code + Azure CLI (idempotent)
 # ---------------------------------------------------------------------------
-Write-Host "`n==> Setting preAuthorizedApplications for VS Code" -ForegroundColor Cyan
+Write-Host "`n==> Setting preAuthorizedApplications" -ForegroundColor Cyan
 
-$vscodeAppId   = 'aebc6443-996d-45c2-90f0-388ff96faa56'
+$requiredPreAuth = @(
+    @{ appId = 'aebc6443-996d-45c2-90f0-388ff96faa56'; label = 'VS Code' }
+    @{ appId = '04b07795-8ddb-461a-bbee-02f9e1bf7b46'; label = 'Azure CLI' }
+)
+
 $existingPreAuth = @(az ad app show --id $objectId --query "api.preAuthorizedApplications" -o json | ConvertFrom-Json)
-$hasPreAuth = $existingPreAuth | Where-Object { $_.appId -eq $vscodeAppId }
+$missing = $requiredPreAuth | Where-Object { $ea = $existingPreAuth; $id = $_.appId; -not ($ea | Where-Object { $_.appId -eq $id }) }
 
-if ($hasPreAuth) {
-    Write-Host "  VS Code pre-authorization already exists — skipping."
+if (-not $missing) {
+    Write-Host "  All pre-authorizations already exist — skipping."
 } else {
-    $body = @{
-        api = @{
-            preAuthorizedApplications = @(
-                @{
-                    appId                  = $vscodeAppId
-                    delegatedPermissionIds = @($scopeId)
-                }
-            )
-        }
-    }
+    $missing | ForEach-Object { Write-Host "  Adding pre-authorization for $($_.label) ($($_.appId))" }
+    # Build full merged array (existing + new) to avoid overwriting
+    $merged = @($existingPreAuth | ForEach-Object { @{ appId = $_.appId; delegatedPermissionIds = @($scopeId) } })
+    $missing | ForEach-Object { $merged += @{ appId = $_.appId; delegatedPermissionIds = @($scopeId) } }
+    $body = @{ api = @{ preAuthorizedApplications = $merged } }
     Invoke-GraphPatch -Uri "https://graph.microsoft.com/v1.0/applications/$objectId" -Body $body | Write-Host
-    Write-Host "  VS Code pre-authorization added."
+    Write-Host "  Pre-authorizations updated."
 }
 
 # ---------------------------------------------------------------------------
@@ -138,7 +137,11 @@ if ($existingCreds.Count -gt 0) {
 # 5. Add APIM callback redirectUri (Phase 5 — only if APIM is deployed)
 # ---------------------------------------------------------------------------
 if ($apimUrl) {
-    $callbackUri = "https://$apimUrl/callback"
+    # gatewayUrl from ARM already includes https:// scheme — use as-is
+    $callbackUri = "$apimUrl/callback"
+    if (-not $apimUrl.StartsWith("https://")) {
+        $callbackUri = "https://$apimUrl/callback"
+    }
     Write-Host "`n==> Adding callback redirectUri: $callbackUri" -ForegroundColor Cyan
 
     $existingUris = @(az ad app show --id $objectId --query "web.redirectUris" -o json | ConvertFrom-Json)

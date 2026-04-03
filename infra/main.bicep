@@ -48,6 +48,22 @@ module entraApps 'modules/entra-apps.bicep' = {
   ]
 }
 
+// APIM instance + PRM API (Phase 4), grows in Phase 5 and 6
+module apim 'modules/apim.bicep' = {
+  name: 'apim'
+  scope: rg
+  params: {
+    name: 'apim-${resourceToken}'
+    location: location
+    managedIdentityId: managedIdentity.outputs.id
+    managedIdentityClientId: managedIdentity.outputs.clientId
+    tenantId: subscription().tenantId
+    apimAppClientId: entraApps.outputs.appId
+    adoOrganization: adoOrganization
+    tags: tags
+  }
+}
+
 // Outputs
 output AZURE_LOCATION string = location
 output AZURE_TENANT_ID string = subscription().tenantId
@@ -59,3 +75,5 @@ output MANAGED_IDENTITY_NAME string = managedIdentity.outputs.name
 output APIM_APP_CLIENT_ID string = entraApps.outputs.appId
 output APIM_APP_OBJECT_ID string = entraApps.outputs.objectId
 output APIM_APP_SCOPE_ID string = entraApps.outputs.userImpersonationScopeId
+output APIM_GATEWAY_URL string = apim.outputs.gatewayUrl
+output APIM_NAME string = apim.outputs.apimName
