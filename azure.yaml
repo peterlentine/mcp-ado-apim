@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+name: mcp-ado-apim
+metadata:
+  template: mcp-ado-apim@0.0.1
+
+infra:
+  provider: bicep
+  path: infra
+
+hooks:
+  postprovision:
+    shell: pwsh
+    run: ./hooks/postprovision.ps1
+    interactive: true
+    continueOnError: false
