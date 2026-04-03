@@ -1,0 +1,51 @@
+<!--
+  authorize.xml — PHASE 3 (functional redirect, no CSRF state)
+  ─────────────────────────────────────────────────────────────────────────────
+  Redirects the browser to Entra ID to collect delegated consent for the
+  Azure DevOps user_impersonation scope.
+
+  Phase 3: Redirect works end-to-end. The authorization code lands at
+           /callback which returns a placeholder response.
+  Phase 4: Adds a random `state` parameter cached in APIM for CSRF validation
+           and the callback fully exchanges the code for tokens.
+
+  Named values used:
+    {{tenant-id}}           — Entra tenant ID
+    {{apim-app-client-id}}  — APIM MCP Proxy app client ID
+  ─────────────────────────────────────────────────────────────────────────────
+-->
+<policies>
+  <inbound>
+    <base />
+    <return-response>
+      <set-status code="302" reason="Found" />
+      <set-header name="Location" exists-action="override">
+        <value>@{
+          var tenantId   = "{{tenant-id}}";
+          var clientId   = "{{apim-app-client-id}}";
+          var host       = context.Request.OriginalUrl.Scheme + "://" + context.Request.OriginalUrl.Host;
+          var redirectUri = System.Uri.EscapeDataString(host + "/callback");
+          var scope = System.Uri.EscapeDataString(
+            "499b84ac-1321-427f-aa17-267ca6975798/user_impersonation openid profile"
+          );
+          return "https://login.microsoftonline.com/" + tenantId
+            + "/oauth2/v2.0/authorize"
+            + "?client_id="     + clientId
+            + "&response_type=code"
+            + "&redirect_uri="  + redirectUri
+            + "&scope="         + scope
+            + "&prompt=consent";
+        }</value>
+      </set-header>
+    </return-response>
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>

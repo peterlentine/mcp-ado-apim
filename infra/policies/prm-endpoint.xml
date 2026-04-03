@@ -1,0 +1,49 @@
+<!--
+  prm-endpoint.xml — FUNCTIONAL (Phase 3+)
+  ─────────────────────────────────────────────────────────────────────────────
+  Returns RFC 9728 Protected Resource Metadata so MCP clients can
+  auto-discover the correct authorization server and scopes.
+
+  Named values used:
+    {{tenant-id}}           — Entra tenant ID
+    {{apim-app-client-id}}  — APIM MCP Proxy app client ID
+
+  The resource URI and scope URI are constructed dynamically at runtime
+  using the incoming request hostname (handles any custom domain / ngrok).
+  ─────────────────────────────────────────────────────────────────────────────
+-->
+<policies>
+  <inbound>
+    <base />
+    <return-response>
+      <set-status code="200" reason="OK" />
+      <set-header name="Content-Type" exists-action="override">
+        <value>application/json</value>
+      </set-header>
+      <set-header name="Cache-Control" exists-action="override">
+        <value>public, max-age=3600</value>
+      </set-header>
+      <set-body>@{
+        var host = context.Request.OriginalUrl.Scheme + "://" + context.Request.OriginalUrl.Host;
+        var clientId = "{{apim-app-client-id}}";
+        var tenantId = "{{tenant-id}}";
+        return "{"
+          + "\"resource\":\"" + host + "/mcp\","
+          + "\"authorization_servers\":[\"https://login.microsoftonline.com/" + tenantId + "/v2.0\"],"
+          + "\"scopes_supported\":[\"api://" + clientId + "/user_impersonation\"],"
+          + "\"bearer_methods_supported\":[\"header\"],"
+          + "\"resource_name\":\"Azure DevOps MCP (via APIM)\""
+          + "}";
+      }</set-body>
+    </return-response>
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>

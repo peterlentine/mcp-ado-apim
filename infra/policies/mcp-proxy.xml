@@ -1,0 +1,213 @@
+<!--
+  mcp-proxy.xml — Phase 4: Full OAuth 2.0 On-Behalf-Of proxy policy
+  ─────────────────────────────────────────────────────────────────────────────
+  Flow:
+    1. Reject requests with no Bearer token (401 + WWW-Authenticate / PRM)
+    2. Validate incoming token — audience must be the APIM Entra app
+       (errors raise an exception → on-error returns 401 + WWW-Authenticate)
+    3. Fetch a managed-identity token for api://AzureADTokenExchange
+       (used as client_assertion — no client secret needed)
+    4. Exchange user token for ADO token via OBO grant
+    5a. Success  → replace Authorization header with ADO token, forward to backend
+    5b. Consent required → 403 + consent_uri for the user to grant access
+    5c. Other OBO error → 502
+
+  Named values used:
+    {{tenant-id}}                — Entra tenant ID
+    {{apim-app-client-id}}       — APIM MCP Proxy Entra app client ID
+    {{managed-identity-client-id}} — User-assigned MI client ID
+    {{ado-scope}}                — 499b84ac-.../user_impersonation
+  ─────────────────────────────────────────────────────────────────────────────
+-->
+<policies>
+  <inbound>
+    <base />
+
+    <!-- ── 1. Reject unauthenticated requests immediately ─────────────────── -->
+    <choose>
+      <when condition="@(!context.Request.Headers.ContainsKey("Authorization") ||
+                         !context.Request.Headers["Authorization"][0].StartsWith("Bearer "))">
+        <return-response>
+          <set-status code="401" reason="Unauthorized" />
+          <set-header name="WWW-Authenticate" exists-action="override">
+            <value>@("Bearer resource_metadata=\"https://" + context.Request.OriginalUrl.Host + "/.well-known/oauth-protected-resource\"")</value>
+          </set-header>
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>{"error":"missing_token","error_description":"Bearer token required. See WWW-Authenticate for authorization guidance."}</set-body>
+        </return-response>
+      </when>
+    </choose>
+
+    <!-- ── 2. Validate token — must be issued for the APIM Entra app ────────
+         No failed-validation-httpcode → validation errors go to on-error,
+         which returns 401 + WWW-Authenticate. -->
+    <validate-azure-ad-token tenant-id="{{tenant-id}}">
+      <audiences>
+        <audience>api://{{apim-app-client-id}}</audience>
+        <audience>{{apim-app-client-id}}</audience>
+      </audiences>
+    </validate-azure-ad-token>
+
+    <!-- ── 3. Capture the incoming user token for step 4 ─────────────────── -->
+    <set-variable name="userToken"
+                  value="@(context.Request.Headers["Authorization"][0].Substring("Bearer ".Length))" />
+
+    <!-- ── 4. Get MI token for AzureADTokenExchange (OBO client_assertion) ── -->
+    <authentication-managed-identity
+        resource="api://AzureADTokenExchange"
+        client-id="{{managed-identity-client-id}}"
+        output-token-variable-name="miToken" />
+
+    <!-- ── 5. OBO exchange: user token (APIM aud) → ADO token ─────────────── -->
+    <send-request mode="new" response-variable-name="oboResponse" timeout="20" ignore-error="true">
+      <set-url>@("https://login.microsoftonline.com/{{tenant-id}}/oauth2/v2.0/token")</set-url>
+      <set-method>POST</set-method>
+      <set-header name="Content-Type" exists-action="override">
+        <value>application/x-www-form-urlencoded</value>
+      </set-header>
+      <set-body>@{
+        return "grant_type="    + Uri.EscapeDataString("urn:ietf:params:oauth:grant-type:jwt-bearer")
+          + "&client_id={{apim-app-client-id}}"
+          + "&client_assertion_type=" + Uri.EscapeDataString("urn:ietf:params:oauth:client-assertion-type:jwt-bearer")
+          + "&client_assertion="      + Uri.EscapeDataString((string)context.Variables["miToken"])
+          + "&assertion="             + Uri.EscapeDataString((string)context.Variables["userToken"])
+          + "&scope="                 + Uri.EscapeDataString("{{ado-scope}}")
+          + "&requested_token_use=on_behalf_of";
+      }</set-body>
+    </send-request>
+
+    <!-- ── 6. Route based on OBO outcome ─────────────────────────────────── -->
+    <choose>
+
+      <!-- 6a. Success — swap Authorization header and let request through -->
+      <when condition="@(((IResponse)context.Variables["oboResponse"]).StatusCode == 200)">
+        <set-header name="Authorization" exists-action="override">
+          <value>@("Bearer " + ((IResponse)context.Variables["oboResponse"]).Body.As<JObject>()["access_token"].ToString())</value>
+        </set-header>
+      </when>
+
+      <!-- 6b. OBO returned an error -->
+      <otherwise>
+        <set-variable name="oboError"
+                      value="@(((IResponse)context.Variables["oboResponse"]).Body.As<JObject>())" />
+        <choose>
+
+          <!-- 6b-i. User consent to ADO not yet granted -->
+          <when condition="@{
+            var e = (string)((JObject)context.Variables["oboError"])["error"] ?? "";
+            var s = (string)((JObject)context.Variables["oboError"])["suberror"] ?? "";
+            return e == "interaction_required"
+                || (e == "invalid_grant" && (s == "consent_required"
+                                          || s == "basic_action"
+                                          || s == "additional_action"));
+          }">
+            <return-response>
+              <set-status code="403" reason="Forbidden" />
+              <set-header name="WWW-Authenticate" exists-action="override">
+                <value>@{
+                  var host = context.Request.OriginalUrl.Host;
+                  return "Bearer"
+                    + " resource_metadata=\"https://" + host + "/.well-known/oauth-protected-resource\""
+                    + ", consent_uri=\"https://" + host + "/authorize\""
+                    + ", error=\"insufficient_scope\""
+                    + ", error_description=\"User consent to Azure DevOps is required\"";
+                }</value>
+              </set-header>
+              <set-header name="Content-Type" exists-action="override">
+                <value>application/json</value>
+              </set-header>
+              <set-body>@{
+                var host   = context.Request.OriginalUrl.Host;
+                var oboErr = (JObject)context.Variables["oboError"];
+                return new JObject(
+                  new JProperty("error",             "consent_required"),
+                  new JProperty("error_description", "User consent to Azure DevOps is required. Visit consent_uri in a browser to authorize, then retry."),
+                  new JProperty("consent_uri",       "https://" + host + "/authorize"),
+                  new JProperty("obo_error",         oboErr["error"]?.ToString()),
+                  new JProperty("obo_suberror",      oboErr["suberror"]?.ToString()),
+                  new JProperty("obo_error_description", oboErr["error_description"]?.ToString())
+                ).ToString();
+              }</set-body>
+            </return-response>
+          </when>
+
+          <!-- 6b-ii. Token expired / other grant failure -->
+          <when condition="@((string)((JObject)context.Variables["oboError"])["error"] == "invalid_grant")">
+            <return-response>
+              <set-status code="401" reason="Unauthorized" />
+              <set-header name="WWW-Authenticate" exists-action="override">
+                <value>@("Bearer resource_metadata=\"https://" + context.Request.OriginalUrl.Host + "/.well-known/oauth-protected-resource\", error=\"invalid_token\"")</value>
+              </set-header>
+              <set-header name="Content-Type" exists-action="override">
+                <value>application/json</value>
+              </set-header>
+              <set-body>@{
+                var oboErr = (JObject)context.Variables["oboError"];
+                return new JObject(
+                  new JProperty("error",             "invalid_token"),
+                  new JProperty("error_description", "Token exchange failed. The user token may be expired or missing the required scope."),
+                  new JProperty("obo_error",         oboErr["error"]?.ToString()),
+                  new JProperty("obo_error_description", oboErr["error_description"]?.ToString())
+                ).ToString();
+              }</set-body>
+            </return-response>
+          </when>
+
+          <!-- 6b-iii. Unexpected token-endpoint error -->
+          <otherwise>
+            <return-response>
+              <set-status code="502" reason="Bad Gateway" />
+              <set-header name="Content-Type" exists-action="override">
+                <value>application/json</value>
+              </set-header>
+              <set-body>@{
+                var oboErr = (JObject)context.Variables["oboError"];
+                return new JObject(
+                  new JProperty("error",             "obo_exchange_failed"),
+                  new JProperty("error_description", "The on-behalf-of token exchange failed."),
+                  new JProperty("obo_error",         oboErr["error"]?.ToString()),
+                  new JProperty("obo_suberror",      oboErr["suberror"]?.ToString()),
+                  new JProperty("obo_error_description", oboErr["error_description"]?.ToString())
+                ).ToString();
+              }</set-body>
+            </return-response>
+          </otherwise>
+
+        </choose>
+      </otherwise>
+    </choose>
+
+  </inbound>
+
+  <backend>
+    <base />
+  </backend>
+
+  <outbound>
+    <base />
+  </outbound>
+
+  <!-- Token-validation exceptions arrive here.
+       Return 401 + WWW-Authenticate so clients know to acquire a new token. -->
+  <on-error>
+    <base />
+    <return-response>
+      <set-status code="401" reason="Unauthorized" />
+      <set-header name="WWW-Authenticate" exists-action="override">
+        <value>@("Bearer resource_metadata=\"https://" + context.Request.OriginalUrl.Host + "/.well-known/oauth-protected-resource\"")</value>
+      </set-header>
+      <set-header name="Content-Type" exists-action="override">
+        <value>application/json</value>
+      </set-header>
+      <set-body>@{
+        return new JObject(
+          new JProperty("error",             "token_validation_failed"),
+          new JProperty("error_description", context.LastError?.Message ?? "Token validation failed. Ensure the token has the APIM audience.")
+        ).ToString();
+      }</set-body>
+    </return-response>
+  </on-error>
+
+</policies>

@@ -1,0 +1,77 @@
+<!--
+  callback.xml — Phase 4: OAuth consent callback
+  ─────────────────────────────────────────────────────────────────────────────
+  Receives the redirect from Entra ID after the user grants (or denies) consent
+  via /authorize.
+
+  For the OBO flow, no code exchange is needed here — Entra records that the
+  user consented, and subsequent OBO exchanges in mcp-proxy.xml succeed
+  automatically. We just confirm success and tell the user to close the window.
+
+  Query parameters:
+    ?code=...         — authorization code (consent successful)
+    ?error=...        — error code (e.g. access_denied)
+    ?error_description=... — human-readable error
+  ─────────────────────────────────────────────────────────────────────────────
+-->
+<policies>
+  <inbound>
+    <base />
+    <return-response>
+      <set-status code="200" reason="OK" />
+      <set-header name="Content-Type" exists-action="override">
+        <value>text/html</value>
+      </set-header>
+      <set-body>@{
+        var code      = context.Request.Url.Query.GetValueOrDefault("code", "");
+        var error     = context.Request.Url.Query.GetValueOrDefault("error", "");
+        var errorDesc = context.Request.Url.Query.GetValueOrDefault("error_description", "");
+
+        var style = "<style>"
+          + "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;"
+          +      "max-width:520px;margin:80px auto;padding:0 24px;color:#1f2937}"
+          + "h2{font-size:1.5rem;margin-bottom:.5rem}"
+          + "p{color:#4b5563;line-height:1.6}"
+          + ".badge{display:inline-block;padding:2px 10px;border-radius:9999px;"
+          +        "font-size:.8rem;font-weight:600;margin-bottom:1rem}"
+          + ".ok{background:#d1fae5;color:#065f46}"
+          + ".err{background:#fee2e2;color:#991b1b}"
+          + "</style>";
+
+        if (!string.IsNullOrEmpty(error)) {
+          return "<html><head><title>Consent Error</title>" + style + "</head><body>"
+            + "<span class='badge err'>Error</span>"
+            + "<h2>Consent was not granted</h2>"
+            + "<p><strong>" + System.Net.WebUtility.HtmlEncode(error) + "</strong></p>"
+            + "<p>" + System.Net.WebUtility.HtmlEncode(errorDesc) + "</p>"
+            + "</body></html>";
+        }
+
+        if (string.IsNullOrEmpty(code)) {
+          return "<html><head><title>Callback Error</title>" + style + "</head><body>"
+            + "<span class='badge err'>Error</span>"
+            + "<h2>Unexpected callback</h2>"
+            + "<p>The callback was called without a code or error parameter.</p>"
+            + "</body></html>";
+        }
+
+        return "<html><head><title>Consent Granted</title>" + style + "</head><body>"
+          + "<span class='badge ok'>Success</span>"
+          + "<h2>Consent granted &#x2714;</h2>"
+          + "<p>Azure DevOps access has been authorized. You can close this window.</p>"
+          + "<p>Return to your MCP client and retry your request &mdash; "
+          + "the on-behalf-of exchange will now succeed.</p>"
+          + "</body></html>";
+      }</set-body>
+    </return-response>
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>

@@ -1,0 +1,100 @@
+# APIM MCP ↔ Azure DevOps OBO Flow — REST Client test file
+# ─────────────────────────────────────────────────────────────────────────────
+# Prerequisites:
+#   • VS Code extension: REST Client (humao.rest-client)
+#   • Either:
+#       a) Set @bearerToken below manually (run tools/test-auth.ps1 and paste), OR
+#       b) Use the az CLI snippet at the bottom to get a token automatically
+#
+# Usage:
+#   Click "Send Request" above any ### block to run that request.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@gateway        = https://apim-mcp-ado-mcp-ado.azure-api.net
+@apimClientId   = 355d2574-1ed9-4fa3-9197-8de6242f8412
+@tenantId       = 1318d57f-757b-45b3-b1b0-9b3c3842774f
+@apimScope      = api://{{apimClientId}}/user_impersonation
+
+# Paste a token here (or generate one with the device-code request below)
+@bearerToken    = PASTE_TOKEN_HERE
+
+###
+# ── 1. Protected Resource Metadata (RFC 9728) ─────────────────────────────────
+# Verifies the PRM endpoint returns correct OAuth resource metadata.
+# Expected: 200 with resource, authorization_servers, scopes_supported
+GET {{gateway}}/.well-known/oauth-protected-resource
+
+###
+# ── 2. MCP endpoint — no token (expect 401 + WWW-Authenticate) ───────────────
+POST {{gateway}}/mcp
+Content-Type: application/json
+
+{
+  "jsonrpc": "2.0",
+  "method": "initialize",
+  "id": 1,
+  "params": {
+    "protocolVersion": "2024-11-05",
+    "capabilities": {},
+    "clientInfo": { "name": "rest-client", "version": "1.0" }
+  }
+}
+
+###
+# ── 3. MCP initialize — with Bearer token ─────────────────────────────────────
+# Expected:
+#   200  — OBO succeeded, forwarded to ADO MCP backend
+#   403  — consent_required; open {{gateway}}/authorize in a browser
+#   401  — token invalid / expired; get a new token
+POST {{gateway}}/mcp
+Content-Type: application/json
+Authorization: Bearer {{bearerToken}}
+
+{
+  "jsonrpc": "2.0",
+  "method": "initialize",
+  "id": 1,
+  "params": {
+    "protocolVersion": "2024-11-05",
+    "capabilities": {},
+    "clientInfo": { "name": "rest-client", "version": "1.0" }
+  }
+}
+
+###
+# ── 4. MCP tools/list — after successful initialize ───────────────────────────
+POST {{gateway}}/mcp
+Content-Type: application/json
+Authorization: Bearer {{bearerToken}}
+
+{
+  "jsonrpc": "2.0",
+  "method": "tools/list",
+  "id": 2
+}
+
+###
+# ── 5. Consent redirect (open in browser, not REST Client) ────────────────────
+# If request 3 returns 403 consent_required, visit this URL in a browser.
+# After granting consent, retry request 3.
+GET {{gateway}}/authorize
+
+###
+# ── 6. Device code — start (get user_code + verification_uri) ─────────────────
+# Run this to bootstrap a token without running test-auth.ps1.
+# Then open verification_uri in a browser and enter user_code.
+# Finally run request 7 with the device_code from the response.
+POST https://login.microsoftonline.com/{{tenantId}}/oauth2/v2.0/devicecode
+Content-Type: application/x-www-form-urlencoded
+
+client_id={{apimClientId}}&scope={{apimScope}} openid profile
+
+###
+# ── 7. Device code — poll for token ───────────────────────────────────────────
+# Replace DEVICE_CODE with the value returned by request 6.
+# Poll every ~5 s until you get access_token (authorization_pending is normal).
+# Copy the access_token value into @bearerToken above.
+POST https://login.microsoftonline.com/{{tenantId}}/oauth2/v2.0/token
+Content-Type: application/x-www-form-urlencoded
+
+client_id={{apimClientId}}&grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code=DEVICE_CODE
