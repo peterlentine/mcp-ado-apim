@@ -190,11 +190,11 @@ VS Code uses this app ID when acquiring tokens interactively. By adding it to `p
 
 ## Post-Provision Hook (`hooks/postprovision.ps1`)
 
-Runs automatically after `azd provision`. Performs steps that cannot be done in Bicep:
+Runs automatically after `azd provision`. Performs steps that cannot be done in Bicep. **Grows across phases 3 and 5**:
 
+**Phase 3:**
 1. **Set `identifierUris`** — `az ad app update --id {objectId} --identifier-uris "api://{appId}"`
-2. **Add callback redirectUri** — Updates `web.redirectUris` to include `https://{apim-gateway-url}/callback`
-3. **Create federated identity credential**:
+2. **Create federated identity credential**:
    ```powershell
    az ad app federated-credential create --id {objectId} --parameters '{
      "name": "apim-managed-identity",
@@ -203,48 +203,97 @@ Runs automatically after `azd provision`. Performs steps that cannot be done in 
      "audiences": ["api://AzureADTokenExchange"]
    }'
    ```
-4. **No admin consent** — Left to end-user via runtime consent flow
+
+**Phase 5:**
+3. **Add callback redirectUri** — Updates `web.redirectUris` to include `https://{apim-gateway-url}/callback`
+
+**No admin consent** — Left to end-user via runtime consent flow
 
 ---
 
 ## AZD Project Structure
+
+**IMPORTANT**: `infra/main.bicep` and `infra/modules/apim.bicep` are written **incrementally** across phases. Do not write these files in full upfront — each phase adds only the new resources needed for that phase's validation gate.
 
 ```
 mcp-ado-apim/
 ├── azure.yaml                          # AZD config: infra path, hooks
 ├── infra/
 │   ├── bicepconfig.json                # Graph Bicep extension declaration
-│   ├── main.bicep                      # Module orchestration + outputs
+│   ├── main.bicep                      # Module orchestration + outputs (grows phases 1→2→4→5)
 │   ├── main.parameters.json            # Binds AZURE_ENV_NAME, AZURE_LOCATION
 │   ├── modules/
-│   │   ├── managed-identity.bicep      # User-assigned MI
-│   │   ├── entra-apps.bicep            # App registration + SP (Graph Bicep)
-│   │   └── apim.bicep                  # APIM, APIs, backend, named values
+│   │   ├── managed-identity.bicep      # User-assigned MI (phase 1)
+│   │   ├── entra-apps.bicep            # App registration + SP (phase 2)
+│   │   └── apim.bicep                  # APIM, APIs, backend (grows phases 4→5→6)
 │   └── policies/
-│       ├── mcp-proxy.xml               # OBO flow policy
-│       ├── prm-endpoint.xml            # PRM static response
-│       ├── authorize.xml               # Consent redirect
-│       └── callback.xml                # Consent code exchange
+│       ├── prm-endpoint.xml            # PRM static response (phase 4)
+│       ├── mcp-proxy.xml               # OBO flow policy (phase 5)
+│       ├── authorize.xml               # Consent redirect (phase 6)
+│       └── callback.xml                # Consent code exchange (phase 6)
 ├── hooks/
-│   └── postprovision.ps1               # Federated cred + identifierUris + redirectUri
+│   └── postprovision.ps1               # Federated cred (phase 3) + redirectUri (phase 5)
 ├── tools/
-│   ├── test-auth.ps1                   # PowerShell auth + MCP test script
-│   └── test-mcp.http                   # REST Client test file
+│   ├── test-auth.ps1                   # PowerShell auth + MCP test (phase 7)
+│   └── test-mcp.http                   # REST Client test file (phase 7)
 └── .vscode/
-    └── mcp.json                        # VS Code MCP server config
+    └── mcp.json                        # VS Code MCP server config (phase 8)
 ```
 
 ---
 
 ## Deployment Sequence
 
-```
+Deploy **phase by phase** — validate before proceeding.
+
+### Phase 1: Scaffold + MI
+```powershell
 azd auth login
 azd env new mcp-ado
 azd env set AZURE_SUBSCRIPTION_ID 8b0337f7-16f0-43e3-827a-9f438eac90e9
 azd env set AZURE_LOCATION eastus
 azd provision
-# hooks/postprovision.ps1 runs automatically
+# Validate: az identity show -g {rg} -n {mi-name}
+```
+
+### Phase 2: Entra App Reg
+```powershell
+azd provision
+# Validate: az ad app show --id {objectId}
+```
+
+### Phase 3: Post-Provision Hook
+```powershell
+azd provision
+# Validate: az ad app federated-credential list --id {objectId}
+```
+
+### Phase 4: APIM + PRM
+```powershell
+azd provision  # ~5-10 min for APIM first deploy
+# Validate: curl https://{gateway}/.well-known/oauth-protected-resource
+```
+
+### Phase 5: MCP Proxy + OBO
+```powershell
+azd provision
+# Validate: POST /mcp (no token) → 401; POST /mcp (with token) → 403 consent_required
+```
+
+### Phase 6: Consent Flow
+```powershell
+azd provision
+# Validate: GET /authorize → 302; browser consent flow; POST /mcp → 200
+```
+
+### Phase 7: Test Tools
+```powershell
+# Validate: tools/test-auth.ps1 runs; test-mcp.http requests succeed
+```
+
+### Phase 8: VS Code
+```powershell
+# Validate: ado-via-apim appears in agent mode; ADO tools populate
 ```
 
 ---
@@ -292,6 +341,10 @@ azd provision
 | 6 | No admin consent; runtime consent via `/authorize` + `/callback` | User does not have admin consent rights. First MCP call returns 403 with `consent_uri`. User visits `/authorize` once in browser; thereafter OBO succeeds. |
 | 7 | PRM as a separate APIM API with `return-response` | Keeps PRM decoupled from MCP proxy logic; no backend call needed. |
 | 8 | OBO consent check returns 403 (not 401) | 401 is for authentication failures (no/invalid token). 403 with `consent_required` + `consent_uri` is a distinct authorization error that the client can act on. |
+| 9 | **Incremental `main.bicep` + `apim.bicep` growth per phase** | Enables validation gates — each phase deploys only what's new. Prevents all-or-nothing deployments. |
+| 10 | **APIM deployed with PRM-only first (Phase 4)** | Validates APIM is reachable with simplest possible endpoint before layering OBO complexity. |
+| 11 | **Consent endpoints in separate phase from OBO (Phase 6 vs 5)** | Phase 5 can validate that OBO correctly detects missing consent (403) before wiring the fix (consent flow). |
+| 12 | **Hook updated across two phases (3 and 5)** | Phase 3 does federated cred (no APIM URL yet). Phase 5 adds callback redirectUri (APIM URL now known). |
 
 ---
 
