@@ -1,0 +1,41 @@
+<policies>
+  <inbound>
+    <base />
+    <!--
+      Admin consent initiation — GET /authorize
+      Redirects to the Entra *admin consent* endpoint so a tenant admin can grant
+      the Azure DevOps user_impersonation delegated permission for all users.
+      After approval Entra redirects to /callback?admin_consent=True&tenant=...
+    -->
+    <return-response>
+      <set-status code="302" reason="Found" />
+      <set-header name="Location" exists-action="override">
+        <value>@{
+          var tenantId    = "{{tenant-id}}";
+          var clientId    = "{{apim-app-client-id}}";
+          var gatewayUrl  = context.Request.OriginalUrl.Scheme + "://" + context.Request.OriginalUrl.Host;
+          var redirectUri = Uri.EscapeDataString(gatewayUrl + "/callback");
+          var state       = System.Guid.NewGuid().ToString("N");
+          return
+            "https://login.microsoftonline.com/" + tenantId + "/v2.0/adminconsent"
+            + "?client_id="     + clientId
+            + "&redirect_uri="  + redirectUri
+            + "&scope="         + Uri.EscapeDataString("https://management.azure.com/.default")
+            + "&state="         + state;
+        }</value>
+      </set-header>
+    </return-response>
+  </inbound>
+
+  <backend>
+    <base />
+  </backend>
+
+  <outbound>
+    <base />
+  </outbound>
+
+  <on-error>
+    <base />
+  </on-error>
+</policies>

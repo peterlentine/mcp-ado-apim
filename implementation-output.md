@@ -263,6 +263,48 @@ Discovery method: tested `apiType: 'mcp'` and confirmed `type: 'mcp'` property r
 
 ---
 
+## Phase 6 — Consent Flow (Authorize + Callback)
+
+### Discovery: Admin Consent Required
+
+During implementation, the user-consent `/oauth2/v2.0/authorize` flow was initially built as planned. When tested in a browser, Entra rejected the consent page with **"Need admin approval"** — the Wegmans tenant has a Conditional Access / consent policy that blocks users from granting delegated permissions to third-party apps. **Admin-level consent is required.**
+
+**Adaptation**: `authorize.xml` was updated to redirect to the `/adminconsent` endpoint instead of `/oauth2/v2.0/authorize`. The admin consent callback returns `?admin_consent=True&tenant=...` (no `code` parameter), so `callback.xml` was updated to handle both scenarios: (A) admin consent callback → return success HTML, (B) auth code exchange (legacy/user consent path, retained for completeness).
+
+### Changes Made
+
+| File | Action | Description |
+|------|--------|-------------|
+| `infra/policies/authorize.xml` | Created | 302 redirect to `https://login.microsoftonline.com/{{tenant-id}}/adminconsent?client_id={{apim-app-client-id}}&redirect_uri={gateway}/callback&state={guid}` — no `scope` or `prompt` params (adminconsent endpoint doesn't use them) |
+| `infra/policies/callback.xml` | Created | Dual-mode handler: if `?admin_consent=True` → return 200 success HTML; otherwise extract `?code` → MI assertion → auth code exchange → 200 success HTML or 400 error JSON |
+| `infra/modules/apim.bicep` | Updated | Added `consentApi` (path `''`, root, no subscription key); `authorizeOperation` GET `/authorize`; `callbackOperation` GET `/callback`; `authorizePolicy` (loads `authorize.xml`); `callbackPolicy` (loads `callback.xml`) |
+
+### Issue Encountered
+
+| Issue | Fix |
+|-------|-----|
+| Wegmans tenant requires admin consent — user consent page shows "Need admin approval" for ADO `user_impersonation` | Updated `authorize.xml` to use `/adminconsent` endpoint instead of `/oauth2/v2.0/authorize` |
+| `callback.xml` had `<!DOCTYPE html>` in `set-body` — APIM XML parser rejected with "Unexpected DTD declaration" | Wrapped all HTML response bodies in `<![CDATA[...]]>` |
+| `replace_string_in_file` left old file tail appended after new `</policies>` closing tag — ARM provision failed with "There are multiple root elements. Line 134, position 6" | Rewrote file using `replace_string_in_file` targeting the full duplicate tail text |
+
+### Current Status
+
+**Blocked on admin consent.** All code is complete and `callback.xml` structural bug is fixed. Next steps:
+
+1. Run `azd provision` to deploy the consent API
+2. Validate:
+   - `GET /authorize` → 302 to `https://login.microsoftonline.com/.../adminconsent?client_id=36eb7a86...`
+   - `GET /callback?admin_consent=True&tenant=1318d57f...` → 200 success HTML
+3. A Wegmans tenant admin must visit `https://apim-ptw4lax6otj5i.azure-api.net/authorize` and click **Accept** on the consent page
+4. After consent: verify `GET oauth2PermissionGrants` for SP `6ae67b41-5515-4878-9c13-729e97a992ca` shows ADO `user_impersonation` grant
+5. Re-run Gate 5 OBO test — should now return 200 MCP response instead of 403
+
+**Admin consent URL**: `https://apim-ptw4lax6otj5i.azure-api.net/authorize`  
+**App needing consent**: APIM MCP ADO Proxy (`36eb7a86-3565-4c53-b010-2d2dc98c5cc2`)  
+**Permission**: Azure DevOps `user_impersonation` (`499b84ac-1321-427f-aa17-267ca6975798/user_impersonation`)
+
+---
+
 ## Deployed Resource Inventory
 
 | Resource | Name | Value |
@@ -282,12 +324,12 @@ Discovery method: tested `apiType: 'mcp'` and confirmed `type: 'mcp'` property r
 | `infra/main.parameters.json` | 1 | ✅ Complete |
 | `infra/modules/managed-identity.bicep` | 1 | ✅ Complete |
 | `infra/modules/entra-apps.bicep` | 2 | ✅ Complete |
-| `infra/modules/apim.bicep` | 4, 5 | ✅ Phase 4+5 complete |
+| `infra/modules/apim.bicep` | 4, 5, 6 | ✅ Phase 4+5+6 complete |
 | `infra/policies/prm-endpoint.xml` | 4, 5 | ✅ Complete (resource URL updated to `/ado/mcp`) |
 | `infra/policies/mcp-server-obo.xml` | 5 | ✅ Complete |
 | `hooks/postprovision.ps1` | 3, 5 | ✅ Phase 3+5 complete |
-| `infra/policies/authorize.xml` | 6 | ⬜ Not started |
-| `infra/policies/callback.xml` | 6 | ⬜ Not started |
+| `infra/policies/authorize.xml` | 6 | ⚠️ Created — awaiting `azd provision` + admin consent |
+| `infra/policies/callback.xml` | 6 | ⚠️ Created — awaiting `azd provision` + admin consent |
 | `tools/test-auth.ps1` | 7 | ⬜ Not started |
 | `tools/test-mcp.http` | 7 | ⬜ Not started |
 | `.vscode/mcp.json` | 8 | ⬜ Not started |

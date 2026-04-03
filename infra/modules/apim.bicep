@@ -176,6 +176,62 @@ resource adoMcpApiPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-06-
 }
 
 // -----------------------------------------------------------------
+// Phase 6: Consent API — GET /authorize + GET /callback
+// Path '' (root) so the operations land at /authorize and /callback
+// -----------------------------------------------------------------
+resource consentApi 'Microsoft.ApiManagement/service/apis@2024-05-01' = {
+  parent: apim
+  name: 'consent'
+  properties: {
+    displayName: 'Consent Flow'
+    path: ''
+    protocols: ['https']
+    subscriptionRequired: false
+    serviceUrl: null
+  }
+}
+
+resource authorizeOperation 'Microsoft.ApiManagement/service/apis/operations@2024-05-01' = {
+  parent: consentApi
+  name: 'get-authorize'
+  properties: {
+    displayName: 'Initiate Consent'
+    method: 'GET'
+    urlTemplate: '/authorize'
+  }
+}
+
+resource authorizePolicy 'Microsoft.ApiManagement/service/apis/operations/policies@2024-05-01' = {
+  parent: authorizeOperation
+  name: 'policy'
+  properties: {
+    format: 'rawxml'
+    value: loadTextContent('../policies/authorize.xml')
+  }
+  dependsOn: [nvTenantId, nvApimAppClientId]
+}
+
+resource callbackOperation 'Microsoft.ApiManagement/service/apis/operations@2024-05-01' = {
+  parent: consentApi
+  name: 'get-callback'
+  properties: {
+    displayName: 'Consent Callback'
+    method: 'GET'
+    urlTemplate: '/callback'
+  }
+}
+
+resource callbackPolicy 'Microsoft.ApiManagement/service/apis/operations/policies@2024-05-01' = {
+  parent: callbackOperation
+  name: 'policy'
+  properties: {
+    format: 'rawxml'
+    value: loadTextContent('../policies/callback.xml')
+  }
+  dependsOn: [nvTenantId, nvApimAppClientId, nvMiClientId]
+}
+
+// -----------------------------------------------------------------
 // Outputs
 // -----------------------------------------------------------------
 output gatewayUrl string = apim.properties.gatewayUrl

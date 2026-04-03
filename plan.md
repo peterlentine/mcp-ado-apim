@@ -166,30 +166,42 @@ APIM Gateway (MCP Server feature)
 ### Phase 6: Consent Flow (Authorize + Callback)
 *Goal: Complete the consent loop. After this phase, the full auth flow works end-to-end.*
 
-20. **Create `infra/policies/authorize.xml`** — Consent initiation policy:
-    - Build Entra authorize URL with `client_id={{apim-app-client-id}}`, `response_type=code`, `redirect_uri=https://{gateway}/callback`, `scope=499b84ac-1321-427f-aa17-267ca6975798/user_impersonation openid profile`, `prompt=consent`, `state={GUID}`
-    - `return-response` 302 redirect to the authorize URL
+20. **Create `infra/policies/authorize.xml`** — Consent initiation policy: ✅ DONE
+    - ~~Build Entra authorize URL with `prompt=consent`~~ **UPDATED**: Wegmans tenant requires admin consent — redirects to `/adminconsent` endpoint instead
+    - `return-response` 302 to `https://login.microsoftonline.com/{{tenant-id}}/adminconsent?client_id={{apim-app-client-id}}&redirect_uri={gateway}/callback&state={guid}`
 
-21. **Create `infra/policies/callback.xml`** — Consent callback policy:
-    - Extract `code` query parameter
-    - `authentication-managed-identity` → MI token for `api://AzureADTokenExchange`
-    - `send-request` auth code exchange to Entra token endpoint (`grant_type=authorization_code`, `client_assertion={MI token}`, `code={code}`, `redirect_uri=https://{gateway}/callback`)
-    - On success: 200 HTML "Consent granted successfully. You can close this window and retry your MCP request."
-    - On error: 400 with error JSON
+21. **Create `infra/policies/callback.xml`** — Consent callback policy: ✅ DONE
+    - Dual-mode: if `?admin_consent=True` → 200 success HTML (no token exchange needed for admin consent)
+    - Otherwise: extract `?code` → MI assertion → auth code exchange → 200 HTML or 400 JSON
+    - ⚠️ Bug fixed: duplicate `</policies>` root from failed `replace_string_in_file` operation — corrected by rewriting file
 
-22. **Update `infra/modules/apim.bicep`** — Add:
-    - **Consent API** (path `/`): `GET /authorize` with `authorize.xml`, `GET /callback` with `callback.xml`, no subscription key
+22. **Update `infra/modules/apim.bicep`** — Add Consent API: ✅ DONE
+    - `consentApi` (path `''`, root) with `GET /authorize` + `GET /callback`, no subscription key
 
-#### Validation Gate 6
-- `az bicep build infra/main.bicep` — no errors
-- `azd provision` — incremental deploy adds consent API operations
-- **Verify authorize redirect**: `curl -s -D - https://{apim-url}/authorize` → 302, `Location` header to `login.microsoftonline.com/...` with correct `client_id`, `scope`, `prompt=consent`, `redirect_uri`
-- **End-to-end consent test** (manual, in browser):
-  1. Visit `https://{apim-url}/authorize` → redirected to Entra consent page
-  2. Grant ADO `user_impersonation` consent
-  3. Redirected to `/callback?code=...` → "Consent granted successfully" HTML
-- **Verify OBO now succeeds**: Acquire fresh user token, `POST /ado/mcp` with MCP `initialize` JSON-RPC body → 200 with valid MCP response from ADO
-- **Verify Streamable HTTP**: Confirm no response buffering — MCP streaming transport works through APIM
+#### Validation Gate 6 — ⚠️ BLOCKED (awaiting admin consent)
+
+**Remaining steps before gate can pass:**
+1. Run `azd provision` — deploys consent API (callback.xml structural bug now fixed)
+2. Validate endpoints:
+   - `GET /authorize` → 302 to `https://login.microsoftonline.com/1318d57f.../adminconsent?client_id=36eb7a86...`
+   - `GET /callback?admin_consent=True&tenant=1318d57f...` → 200 HTML "Admin consent granted"
+3. **MANUAL STEP — Admin required**: Wegmans tenant admin must visit `https://apim-ptw4lax6otj5i.azure-api.net/authorize` and click **Accept** on the Entra admin consent page
+   - App: **APIM MCP ADO Proxy** (`36eb7a86-3565-4c53-b010-2d2dc98c5cc2`)
+   - Permission needed: Azure DevOps `user_impersonation` (`499b84ac-1321-427f-aa17-267ca6975798`)
+4. After consent granted, verify OAuth permission grants:
+   ```powershell
+   az rest --method GET --url "https://graph.microsoft.com/v1.0/servicePrincipals/6ae67b41-5515-4878-9c13-729e97a992ca/oauth2PermissionGrants"
+   # Expect: entry with resourceId matching ADO SP, scope "user_impersonation"
+   ```
+5. **Verify OBO now succeeds**:
+   ```powershell
+   $tok = az account get-access-token --resource "api://36eb7a86-3565-4c53-b010-2d2dc98c5cc2" --query accessToken -o tsv
+   curl -si -X POST "https://apim-ptw4lax6otj5i.azure-api.net/ado/mcp" `
+     -H "Content-Type: application/json" `
+     -H "Authorization: Bearer $tok" `
+     -d '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0.1"}},"id":1}'
+   # Expect: 200 with MCP initialize response from ADO
+   ```
 - **Stop**: Confirm the full authentication + OBO + proxy chain works end-to-end before building test tooling
 
 ---
@@ -273,7 +285,7 @@ APIM Gateway (MCP Server feature)
 | MCP Server created via hook/API, not Bicep | `Microsoft.ApiManagement/service/mcpServers` ARM resource type does not exist yet. Must use APIM management API or portal. |
 | VS Code `aebc6443-996d-45c2-90f0-388ff96faa56` pre-authorized | Silent token acquisition for VS Code users. |
 | Azure CLI `04b07795-8ddb-461a-bbee-02f9e1bf7b46` pre-authorized | Enables `az account get-access-token` for testing. |
-| User consent via `/authorize` + `/callback` (no admin consent) | User lacks admin consent rights. Runtime consent flow. |
+| Admin consent via `/adminconsent` endpoint | Wegmans tenant blocks user-level consent for ADO delegated permissions — Conditional Access policy requires admin approval. Adapted `/authorize` to redirect to `/adminconsent` endpoint. Admin visits `https://apim-ptw4lax6otj5i.azure-api.net/authorize` once to grant tenant-wide consent. |
 | OBO consent failure returns 403 (not 401) | 401 = missing/invalid auth. 403 = authorized but consent needed. |
 | Do NOT access `context.Response.Body` in MCP Server policies | Triggers response buffering that breaks MCP streaming transport. |
 | PRM endpoint kept as separate Bicep API (not on MCP Server) | PRM is a standard REST endpoint, not an MCP protocol endpoint. Bicep manages it normally. |

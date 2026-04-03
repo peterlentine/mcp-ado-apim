@@ -79,7 +79,7 @@
             var gatewayUrl = context.Request.OriginalUrl.Scheme + "://" + context.Request.OriginalUrl.Host;
             return Newtonsoft.Json.JsonConvert.SerializeObject(new {
               error       = "consent_required",
-              description = "User consent is required to access Azure DevOps. Visit consent_uri to grant access.",
+              description = "Admin consent is required to access Azure DevOps. An admin must visit consent_uri to grant access for the organization.",
               consent_uri = gatewayUrl + "/authorize"
             });
           }</set-body>
