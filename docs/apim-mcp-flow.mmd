@@ -1,0 +1,58 @@
+sequenceDiagram
+    participant Copilot as VS Code Copilot<br/>(MCP Client)
+    participant APIM as Azure API Management<br/>apim-ptw4lax6otj5i
+    participant Entra as Microsoft Entra ID
+    participant MI as Managed Identity<br/>id-ptw4lax6otj5i
+    participant ADO as ADO MCP Server<br/>mcp.dev.azure.com/wegmans
+    participant Admin as Tenant Admin<br/>(Browser)
+
+    rect rgb(219, 234, 254)
+        Note over Copilot,ADO: Phase 1 — First Request (No Token) — RFC 9728 PRM Discovery
+        Copilot->>APIM: POST /ado/mcp — no Authorization header
+        APIM-->>Copilot: 401 Unauthorized<br/>WWW-Authenticate: Bearer resource_metadata="…/well-known/oauth-protected-resource"
+        Copilot->>APIM: GET /well-known/oauth-protected-resource
+        APIM-->>Copilot: 200 PRM JSON — { resource, authorization_servers, scopes_supported }
+        Note over Copilot,Entra: Copilot uses PRM to discover the auth server and required token audience
+        Copilot->>Entra: Authenticate user — audience: api://36eb7a86-3565-4c53-b010-2d2dc98c5cc2
+        Entra-->>Copilot: Access token JWT — aud=api://36eb7a86...
+    end
+
+    rect rgb(254, 243, 199)
+        Note over Copilot,ADO: Phase 2 — Request With Token (Admin Consent Not Yet Granted)
+        Copilot->>APIM: POST /ado/mcp — Authorization: Bearer {user_token}
+        APIM->>Entra: validate-azure-ad-token — audiences: apim-app-client-id, api://apim-app-client-id
+        Entra-->>APIM: Token valid ✓
+        Note over APIM: Stash user token from Authorization header
+        APIM->>MI: authentication-managed-identity<br/>resource: api://AzureADTokenExchange
+        MI-->>APIM: MI assertion JWT
+        APIM->>Entra: OBO exchange (jwt-bearer grant)<br/>assertion={user_token} — client_assertion={MI_token}<br/>scope=ADO user_impersonation
+        Entra-->>APIM: 400 — consent_required
+        APIM-->>Copilot: 403 Consent Required<br/>{ error: "consent_required", consent_uri: "…/authorize" }
+    end
+
+    rect rgb(209, 250, 229)
+        Note over Admin,Entra: Phase 3 — One-Time Admin Consent Flow
+        Admin->>APIM: GET /authorize
+        APIM-->>Admin: 302 Redirect<br/>→ login.microsoftonline.com/tenant/v2.0/adminconsent?client_id=…
+        Admin->>Entra: Review and grant consent for ADO user_impersonation
+        Entra-->>Admin: Redirect → /callback?admin_consent=True&tenant=…
+        Admin->>APIM: GET /callback?admin_consent=True
+        APIM-->>Admin: 200 HTML — Admin consent granted successfully ✓
+        Note over Entra: Tenant-wide OAuth2 permission grant created<br/>All users can now access ADO via OBO
+    end
+
+    rect rgb(237, 233, 254)
+        Note over Copilot,ADO: Phase 4 — Full Authenticated Flow (Post-Consent, Happy Path)
+        Copilot->>APIM: POST /ado/mcp — Authorization: Bearer {user_token}
+        APIM->>Entra: validate-azure-ad-token
+        Entra-->>APIM: Token valid ✓
+        Note over APIM: Stash user token from Authorization header
+        APIM->>MI: authentication-managed-identity<br/>resource: api://AzureADTokenExchange
+        MI-->>APIM: MI assertion JWT
+        APIM->>Entra: OBO exchange (jwt-bearer grant)<br/>assertion={user_token} — client_assertion={MI_token}<br/>scope=ADO user_impersonation
+        Entra-->>APIM: 200 OK — ADO access token ✓
+        Note over APIM: Replace inbound Authorization header with ADO OBO token
+        APIM->>ADO: POST /wegmans — MCP JSON-RPC payload<br/>Authorization: Bearer {ado_token}
+        ADO-->>APIM: 200 MCP response (Streamable HTTP)
+        APIM-->>Copilot: 200 MCP response
+    end
