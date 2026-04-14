@@ -7,6 +7,15 @@
     },
     "location": {
       "value": "${AZURE_LOCATION}"
+    },
+    "apimAppClientId": {
+      "value": "58e1d1b0-ce21-48a3-bd21-14e5ce9ccbd2"
+    },
+    "apimAppObjectId": {
+      "value": "167dd07a-dc91-4143-b94c-67c86fe625cf"
+    },
+    "apimAppScopeId": {
+      "value": "c10b593b-1bf0-4e77-9ff2-bab26d95dccc"
     }
   }
 }

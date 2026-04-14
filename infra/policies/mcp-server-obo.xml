@@ -69,7 +69,7 @@
         }
         return false;
       }">
-        <!-- Consent required — return 403 with a usable consent_uri -->
+        <!-- Consent required — return 403 with a usable consent_uri and the raw Entra error for diagnostics -->
         <return-response>
           <set-status code="403" reason="Consent Required" />
           <set-header name="Content-Type" exists-action="override">
@@ -77,10 +77,12 @@
           </set-header>
           <set-body>@{
             var gatewayUrl = context.Request.OriginalUrl.Scheme + "://" + context.Request.OriginalUrl.Host;
+            var oboBody    = ((IResponse)context.Variables["OboResponse"]).Body.As<string>(preserveContent: true);
             return Newtonsoft.Json.JsonConvert.SerializeObject(new {
               error       = "consent_required",
               description = "Admin consent is required to access Azure DevOps. An admin must visit consent_uri to grant access for the organization.",
-              consent_uri = gatewayUrl + "/authorize"
+              consent_uri = gatewayUrl + "/authorize",
+              obo_error   = oboBody
             });
           }</set-body>
         </return-response>
