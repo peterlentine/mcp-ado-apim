@@ -3,6 +3,10 @@
 		"my-mcp-ado": {
 			"url": "https://apim-ptw4lax6otj5i.azure-api.net/ado/mcp",
 			"type": "http"
+		},
+		"central-apim-request-assistant": {
+			"url": "http://localhost:5000",
+			"type": "http"
 		}
 	},
 	"inputs": []

@@ -1,0 +1,8 @@
+### Test
+POST https://apim-ptw4lax6otj5i.azure-api.net/ado/mcp
+Authorization: Bearer <YOUR_ACCESS_TOKEN>
+
+
+#### PRM TEST
+GET https://apim-ptw4lax6otj5i.azure-api.net/ado/mcp/.well-known/oauth-protected-resource/wegmans
+Authorization: Bearer <YOUR_ACCESS_TOKEN>

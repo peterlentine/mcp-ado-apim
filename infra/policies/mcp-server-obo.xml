@@ -7,7 +7,9 @@
       2. Extract the user token.
       3. Acquire an MI assertion token (federated credential toward Entra).
       4. Exchange user token for an ADO token via OBO (jwt-bearer grant).
-      5. On consent_required / interaction_required → return 403 with consent_uri.
+      5a. On MFA required (AADSTS50076) → return 401 with WWW-Authenticate re-auth hint.
+      5b. On consent_required / interaction_required → return 403 with consent_uri.
+      5c. Any other OBO failure → return 502.
       6. On success → set Authorization header with the ADO OBO token.
     -->
 
@@ -35,7 +37,7 @@
     <send-request mode="new"
                   response-variable-name="OboResponse"
                   timeout="30"
-                  ignore-error="false">
+                  ignore-error="true">
       <set-url>https://login.microsoftonline.com/{{tenant-id}}/oauth2/v2.0/token</set-url>
       <set-method>POST</set-method>
       <set-header name="Content-Type" exists-action="override">
@@ -56,9 +58,41 @@
           + "&requested_token_use=on_behalf_of";
       }</set-body>
     </send-request>
-
-    <!-- Step 5: Parse OBO response and check for consent errors -->
+    <!-- From AW: Do I need to use a client id and secret here instead of using managed identity -->
+    
+    <!-- Step 5: Parse OBO response and handle errors -->
     <choose>
+      <!-- Step 5a: MFA required — user must re-authenticate with MFA claim -->
+      <when condition="@{
+        var status = ((IResponse)context.Variables["OboResponse"]).StatusCode;
+        if (status != 200) {
+          var body = ((IResponse)context.Variables["OboResponse"]).Body.As<string>(preserveContent: true);
+          return body.Contains("AADSTS50076") || body.Contains("AADSTS50079");
+        }
+        return false;
+      }">
+        <return-response>
+          <set-status code="401" reason="MFA Required" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-header name="WWW-Authenticate" exists-action="override">
+            <value>@{
+              var gatewayUrl = context.Request.OriginalUrl.Scheme + "://" + context.Request.OriginalUrl.Host;
+              return "Bearer resource_metadata=\"" + gatewayUrl + "/well-known/oauth-protected-resource\", error=\"insufficient_user_authentication\", error_description=\"MFA is required. Re-authenticate with multi-factor authentication.\"";
+            }</value>
+          </set-header>
+          <set-body>@{
+            var oboBody = ((IResponse)context.Variables["OboResponse"]).Body.As<string>(preserveContent: true);
+            return Newtonsoft.Json.JsonConvert.SerializeObject(new {
+              error       = "mfa_required",
+              description = "Multi-factor authentication is required. Please re-authenticate using an MFA-enabled sign-in flow.",
+              obo_error   = oboBody
+            });
+          }</set-body>
+        </return-response>
+      </when>
+      <!-- Step 5b: Consent required — return 403 with a usable consent_uri and the raw Entra error for diagnostics -->
       <when condition="@{
         var status = ((IResponse)context.Variables["OboResponse"]).StatusCode;
         if (status != 200) {
@@ -87,6 +121,7 @@
           }</set-body>
         </return-response>
       </when>
+      <!-- Step 5c: Any other OBO failure — return 502 with the error details -->
       <when condition="@(((IResponse)context.Variables["OboResponse"]).StatusCode != 200)">
         <!-- Any other OBO failure — return 502 with the error details -->
         <return-response>
